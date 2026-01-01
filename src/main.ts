@@ -1,8 +1,10 @@
 import shaderCode from "./shader.wgsl?raw";
 import shaderGradientCode from "./shader-gradient.wgsl?raw";
 import computeGradientCode from "./compute-gradient.wgsl?raw";
+import updatePositionsCode from "./update-positions.wgsl?raw";
 import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
+import { PositionUpdater } from "./PositionUpdater";
 import { Renderer } from "./Renderer";
 
 let useGradientMode = false;
@@ -38,8 +40,8 @@ async function initWebGPU() {
     format: presentationFormat,
   });
 
-  // Create uniform buffer
-  const uniformBufferSize = 4 * 4; // vec2f (8 bytes) + f32 (4 bytes) + padding (4 bytes)
+  // Create uniform buffer (now includes stepSize)
+  const uniformBufferSize = 4 * 4; // vec2f (8 bytes) + f32 time (4 bytes) + f32 stepSize (4 bytes)
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -47,11 +49,18 @@ async function initWebGPU() {
 
   // Initialize components
   const numPoints = 10000;
+  const stepSize = 0.01;
+
   const pointManager = new PointManager(device, numPoints);
   const gradientSampler = new GradientSampler(
     device,
     computeGradientCode,
-    numPoints,
+    numPoints
+  );
+  const positionUpdater = new PositionUpdater(
+    device,
+    updatePositionsCode,
+    numPoints
   );
   const renderer = new Renderer(
     device,
@@ -60,7 +69,7 @@ async function initWebGPU() {
     shaderCode,
     shaderGradientCode,
     uniformBuffer,
-    numPoints,
+    numPoints
   );
 
   // Resize canvas to fill window
@@ -83,7 +92,7 @@ async function initWebGPU() {
   // Render loop
   let startTime = Date.now();
 
-  async function render() {
+  function render() {
     const currentTime = (Date.now() - startTime) / 1000;
 
     // Update uniforms
@@ -91,25 +100,40 @@ async function initWebGPU() {
       canvas.width,
       canvas.height,
       currentTime,
-      0, // padding
+      stepSize,
     ]);
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-    // Evaluate gradients at point positions (compute shader)
-    const gradientResults = await gradientSampler.evaluateGradients(
+    // Create single command encoder for all GPU work
+    const commandEncoder = device.createCommandEncoder();
+
+    // 1. Evaluate gradients at current point positions (compute pass)
+    gradientSampler.evaluateGradients(
+      commandEncoder,
       uniformBuffer,
-      pointManager.getPositionBuffer(),
+      pointManager.getCurrentPositionBuffer()
     );
 
-    // Update point positions based on gradients (CPU)
-    pointManager.updatePositions(device, gradientResults);
+    // 2. Update positions based on gradients (compute pass)
+    positionUpdater.updatePositions(
+      commandEncoder,
+      uniformBuffer,
+      pointManager.getCurrentPositionBuffer(),
+      gradientSampler.getGradientBuffer(),
+      pointManager.getNextPositionBuffer()
+    );
 
-    // Render scene
+    // Submit compute work
+    device.queue.submit([commandEncoder.finish()]);
+
+    // Swap buffers for next frame
+    pointManager.swap();
+
+    // 3. Render scene (separate command encoder for render pass)
     renderer.render(
       useGradientMode,
-      pointManager.getPositions(),
-      gradientResults,
-      numPoints,
+      pointManager.getCurrentPositionBuffer(),
+      gradientSampler.getGradientBuffer()
     );
 
     requestAnimationFrame(render);

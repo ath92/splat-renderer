@@ -2,6 +2,7 @@
 struct Uniforms {
   resolution: vec2f,
   time: f32,
+  stepSize: f32,
 }
 
 // Point data

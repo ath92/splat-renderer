@@ -3,7 +3,7 @@ export class GradientSampler {
   private computePipeline: GPUComputePipeline;
   private bindGroupLayout: GPUBindGroupLayout;
   private gradientBuffer: GPUBuffer;
-  private readbackBuffer: GPUBuffer;
+  private readbackBuffer: GPUBuffer | null = null;
   private numPoints: number;
 
   constructor(
@@ -58,18 +58,13 @@ export class GradientSampler {
       size: gradientBufferSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
-
-    // Create readback buffer
-    this.readbackBuffer = device.createBuffer({
-      size: gradientBufferSize,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
   }
 
-  async evaluateGradients(
+  evaluateGradients(
+    commandEncoder: GPUCommandEncoder,
     uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer
-  ): Promise<Float32Array> {
+  ): void {
     // Create bind group
     const bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
@@ -80,9 +75,6 @@ export class GradientSampler {
       ],
     });
 
-    // Create command encoder
-    const commandEncoder = this.device.createCommandEncoder();
-
     // Dispatch compute shader
     const computePass = commandEncoder.beginComputePass();
     computePass.setPipeline(this.computePipeline);
@@ -90,8 +82,30 @@ export class GradientSampler {
     const workgroupCount = Math.ceil(this.numPoints / 64);
     computePass.dispatchWorkgroups(workgroupCount);
     computePass.end();
+  }
+
+  getGradientBuffer(): GPUBuffer {
+    return this.gradientBuffer;
+  }
+
+  // Optional async readback for debugging (non-blocking)
+  async readbackGradientsAsync(): Promise<Float32Array | null> {
+    // Create readback buffer on first use
+    if (!this.readbackBuffer) {
+      const gradientBufferSize = this.numPoints * 4 * 4;
+      this.readbackBuffer = this.device.createBuffer({
+        size: gradientBufferSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+    }
+
+    // Check if buffer is already mapped (previous read still in progress)
+    if (this.readbackBuffer.mapState !== "unmapped") {
+      return null; // Skip this frame
+    }
 
     // Copy gradient buffer to readback buffer
+    const commandEncoder = this.device.createCommandEncoder();
     commandEncoder.copyBufferToBuffer(
       this.gradientBuffer,
       0,
@@ -99,21 +113,25 @@ export class GradientSampler {
       0,
       this.numPoints * 4 * 4
     );
-
-    // Submit commands
     this.device.queue.submit([commandEncoder.finish()]);
 
-    // Read back results
-    await this.readbackBuffer.mapAsync(GPUMapMode.READ);
-    const arrayBuffer = this.readbackBuffer.getMappedRange();
-    const gradientResults = new Float32Array(arrayBuffer).slice();
-    this.readbackBuffer.unmap();
-
-    return gradientResults;
+    // Read back results asynchronously
+    try {
+      await this.readbackBuffer.mapAsync(GPUMapMode.READ);
+      const arrayBuffer = this.readbackBuffer.getMappedRange();
+      const gradientResults = new Float32Array(arrayBuffer).slice();
+      this.readbackBuffer.unmap();
+      return gradientResults;
+    } catch (error) {
+      console.error("Failed to read back gradients:", error);
+      return null;
+    }
   }
 
   destroy(): void {
     this.gradientBuffer.destroy();
-    this.readbackBuffer.destroy();
+    if (this.readbackBuffer) {
+      this.readbackBuffer.destroy();
+    }
   }
 }

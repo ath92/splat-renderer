@@ -10,7 +10,8 @@ export class Renderer {
 
   // Point rendering pipeline
   private pointPipeline: GPURenderPipeline;
-  private pointVertexBuffer: GPUBuffer;
+  private pointBindGroupLayout: GPUBindGroupLayout;
+  private indirectBuffer: GPUBuffer;
 
   // Bind groups
   private sdfBindGroup: GPUBindGroup;
@@ -93,28 +94,45 @@ export class Renderer {
     });
 
     // Create point visualization shader and pipeline
-    this.pointPipeline = this.createPointPipeline();
-    this.pointVertexBuffer = this.createPointVertexBuffer();
+    const { pipeline, bindGroupLayout } = this.createPointPipeline();
+    this.pointPipeline = pipeline;
+    this.pointBindGroupLayout = bindGroupLayout;
+
+    // Create indirect draw buffer
+    this.indirectBuffer = this.createIndirectBuffer();
   }
 
-  private createPointPipeline(): GPURenderPipeline {
+  private createPointPipeline(): {
+    pipeline: GPURenderPipeline;
+    bindGroupLayout: GPUBindGroupLayout;
+  } {
     const pointShaderCode = `
+      struct PositionData {
+        positions: array<vec2f>,
+      }
+
+      struct GradientData {
+        results: array<vec4f>, // (distance, gradient.x, gradient.y, padding)
+      }
+
+      @group(0) @binding(0) var<storage, read> positions: PositionData;
+      @group(0) @binding(1) var<storage, read> gradients: GradientData;
+
       struct VertexOutput {
         @builtin(position) position: vec4f,
         @location(0) color: vec3f,
       }
 
-      struct PointData {
-        @location(0) center: vec2f,
-        @location(1) distance: f32,
-      }
-
       @vertex
       fn vertexMain(
         @builtin(vertex_index) vertexIndex: u32,
-        point: PointData
+        @builtin(instance_index) instanceIndex: u32
       ) -> VertexOutput {
         var output: VertexOutput;
+
+        // Get point data from storage buffers
+        let center = positions.positions[instanceIndex];
+        let distance = gradients.results[instanceIndex].x;
 
         // Create a small quad for each point
         let size = 0.01;
@@ -125,14 +143,13 @@ export class Renderer {
 
         let localPos = offset[vertexIndex] * size;
         // Flip y to match SDF coordinate system
-        let flippedCenter = vec2f(point.center.x, -point.center.y);
+        let flippedCenter = vec2f(center.x, -center.y);
         output.position = vec4f(flippedCenter + localPos, 0.0, 1.0);
 
         // Color based on distance (red = far, green = close, blue = on surface)
-        let normalizedDist = clamp(abs(point.distance) * 5.0, 0.0, 1.0);
-        if (point.distance > 0.01) {
+        if (distance > 0.01) {
           output.color = vec3f(1.0, 0.0, 0.0); // Red: far from surface
-        } else if (abs(point.distance) < 0.01) {
+        } else if (abs(distance) < 0.01) {
           output.color = vec3f(0.0, 0.0, 1.0); // Blue: on surface
         } else {
           output.color = vec3f(0.0, 1.0, 0.0); // Green: close to surface
@@ -152,21 +169,29 @@ export class Renderer {
       code: pointShaderCode,
     });
 
-    return this.device.createRenderPipeline({
-      layout: "auto",
+    // Create bind group layout for point rendering
+    const bindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+      ],
+    });
+
+    const pipeline = this.device.createRenderPipeline({
+      layout: this.device.createPipelineLayout({
+        bindGroupLayouts: [bindGroupLayout],
+      }),
       vertex: {
         module: pointShaderModule,
         entryPoint: "vertexMain",
-        buffers: [
-          {
-            arrayStride: 3 * 4, // vec2f center + f32 distance
-            stepMode: "instance",
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: "float32x2" }, // center
-              { shaderLocation: 1, offset: 8, format: "float32" }, // distance
-            ],
-          },
-        ],
       },
       fragment: {
         module: pointShaderModule,
@@ -189,21 +214,39 @@ export class Renderer {
       },
       primitive: { topology: "triangle-list" },
     });
+
+    return { pipeline, bindGroupLayout };
   }
 
-  private createPointVertexBuffer(): GPUBuffer {
-    // This will be updated each frame
-    return this.device.createBuffer({
-      size: this.numPoints * 3 * 4, // 3 floats per point (x, y, distance)
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  private createIndirectBuffer(): GPUBuffer {
+    // Indirect draw arguments: vertexCount, instanceCount, firstVertex, firstInstance
+    const indirectArray = new Uint32Array([
+      6, // vertexCount (6 vertices per quad)
+      this.numPoints, // instanceCount
+      0, // firstVertex
+      0, // firstInstance
+    ]);
+
+    const buffer = this.device.createBuffer({
+      size: indirectArray.byteLength,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
+
+    this.device.queue.writeBuffer(
+      buffer,
+      0,
+      indirectArray.buffer,
+      indirectArray.byteOffset,
+      indirectArray.byteLength
+    );
+
+    return buffer;
   }
 
   render(
     useGradientMode: boolean,
-    points: Float32Array,
-    gradientResults: Float32Array,
-    numPoints: number
+    positionBuffer: GPUBuffer,
+    gradientBuffer: GPUBuffer
   ): void {
     const commandEncoder = this.device.createCommandEncoder();
     const textureView = this.context.getCurrentTexture().createView();
@@ -226,8 +269,8 @@ export class Renderer {
     renderPass.setBindGroup(0, this.sdfBindGroup);
     renderPass.draw(3);
 
-    // Render points
-    this.renderPoints(renderPass, points, gradientResults, numPoints);
+    // Render points using indirect rendering
+    this.renderPoints(renderPass, positionBuffer, gradientBuffer);
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
@@ -235,28 +278,25 @@ export class Renderer {
 
   private renderPoints(
     renderPass: GPURenderPassEncoder,
-    points: Float32Array,
-    gradientResults: Float32Array,
-    numPoints: number
+    positionBuffer: GPUBuffer,
+    gradientBuffer: GPUBuffer
   ): void {
-    // Prepare point instance data (center.x, center.y, distance)
-    const pointData = new Float32Array(numPoints * 3);
-    for (let i = 0; i < numPoints; i++) {
-      pointData[i * 3] = points[i * 2]; // x
-      pointData[i * 3 + 1] = points[i * 2 + 1]; // y
-      pointData[i * 3 + 2] = gradientResults[i * 4]; // distance
-    }
+    // Create bind group for point rendering
+    const pointBindGroup = this.device.createBindGroup({
+      layout: this.pointBindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: positionBuffer } },
+        { binding: 1, resource: { buffer: gradientBuffer } },
+      ],
+    });
 
-    // Upload point data
-    this.device.queue.writeBuffer(this.pointVertexBuffer, 0, pointData);
-
-    // Draw points
+    // Draw points using indirect rendering
     renderPass.setPipeline(this.pointPipeline);
-    renderPass.setVertexBuffer(0, this.pointVertexBuffer);
-    renderPass.draw(6, numPoints); // 6 vertices per quad, N instances
+    renderPass.setBindGroup(0, pointBindGroup);
+    renderPass.drawIndirect(this.indirectBuffer, 0);
   }
 
   destroy(): void {
-    this.pointVertexBuffer.destroy();
+    this.indirectBuffer.destroy();
   }
 }
