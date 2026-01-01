@@ -48,19 +48,19 @@ async function initWebGPU() {
   });
 
   // Initialize components
-  const numPoints = 10000;
-  const stepSize = 0.01;
+  const numPoints = 1000000;
+  const stepSize = 1;
 
   const pointManager = new PointManager(device, numPoints);
   const gradientSampler = new GradientSampler(
     device,
     computeGradientCode,
-    numPoints
+    numPoints,
   );
   const positionUpdater = new PositionUpdater(
     device,
     updatePositionsCode,
-    numPoints
+    numPoints,
   );
   const renderer = new Renderer(
     device,
@@ -69,7 +69,7 @@ async function initWebGPU() {
     shaderCode,
     shaderGradientCode,
     uniformBuffer,
-    numPoints
+    numPoints,
   );
 
   // Resize canvas to fill window
@@ -111,7 +111,7 @@ async function initWebGPU() {
     gradientSampler.evaluateGradients(
       commandEncoder,
       uniformBuffer,
-      pointManager.getCurrentPositionBuffer()
+      pointManager.getCurrentPositionBuffer(),
     );
 
     // 2. Update positions based on gradients (compute pass)
@@ -120,7 +120,7 @@ async function initWebGPU() {
       uniformBuffer,
       pointManager.getCurrentPositionBuffer(),
       gradientSampler.getGradientBuffer(),
-      pointManager.getNextPositionBuffer()
+      pointManager.getNextPositionBuffer(),
     );
 
     // Submit compute work
@@ -133,7 +133,7 @@ async function initWebGPU() {
     renderer.render(
       useGradientMode,
       pointManager.getCurrentPositionBuffer(),
-      gradientSampler.getGradientBuffer()
+      gradientSampler.getGradientBuffer(),
     );
 
     requestAnimationFrame(render);

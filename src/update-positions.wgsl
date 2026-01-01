@@ -34,14 +34,14 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
   let distance = gradientResult.x;
   let gradient = gradientResult.yz;
 
-  // Distance-aware gradient descent
-  // newPos = pos - normalize(gradient) * distance * stepSize
+  // Project point directly to surface (distance = 0)
+  // newPos = pos - normalize(gradient) * distance
   let gradLen = length(gradient);
   var newPos = pos;
 
   if (gradLen > 0.0001) {
     let normalizedGrad = gradient / gradLen;
-    newPos = pos - normalizedGrad * distance * uniforms.stepSize;
+    newPos = pos - normalizedGrad * distance; // Instant projection to surface
   }
 
   // Write updated position
