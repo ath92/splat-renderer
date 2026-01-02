@@ -6,6 +6,8 @@ export class PointManager {
   private positionBufferA: GPUBuffer;
   private positionBufferB: GPUBuffer;
   private currentBufferIsA: boolean = true;
+  private device: GPUDevice;
+  private scene: SDFScene;
 
   /**
    * Calculate dynamic point count based on scene
@@ -31,6 +33,8 @@ export class PointManager {
   }
 
   constructor(device: GPUDevice, scene: SDFScene) {
+    this.device = device;
+    this.scene = scene;
     const primitives = scene.getPrimitives();
 
     if (primitives.length === 0) {
@@ -44,7 +48,59 @@ export class PointManager {
       `Initializing ${this.numPoints} points for ${primitives.length} primitive(s)`,
     );
 
-    // Initialize positions distributed across primitive AABBs
+    // Log AABB info for each primitive
+    const totalSurfaceArea = primitives.reduce(
+      (sum, prim) => sum + prim.getSurfaceArea(),
+      0,
+    );
+
+    for (const prim of primitives) {
+      const aabb = scaleAABB(prim.getAABB(), 2);
+      const surfaceArea = prim.getSurfaceArea();
+      const primPointCount = Math.floor(
+        (surfaceArea / totalSurfaceArea) * this.numPoints,
+      );
+
+      console.log(
+        `  ${prim.id}: ${primPointCount} points, AABB: [${aabb.min[0].toFixed(2)}, ${aabb.min[1].toFixed(2)}, ${aabb.min[2].toFixed(2)}] to [${aabb.max[0].toFixed(2)}, ${aabb.max[1].toFixed(2)}, ${aabb.max[2].toFixed(2)}]`,
+      );
+    }
+
+    // Generate initial positions
+    const positions = this.generateRandomPositions();
+
+    // Create ping-pong GPU buffers for positions
+    const bufferSize = positions.byteLength;
+    const bufferUsage =
+      GPUBufferUsage.STORAGE |
+      GPUBufferUsage.COPY_DST |
+      GPUBufferUsage.COPY_SRC;
+
+    this.positionBufferA = device.createBuffer({
+      size: bufferSize,
+      usage: bufferUsage,
+    });
+
+    this.positionBufferB = device.createBuffer({
+      size: bufferSize,
+      usage: bufferUsage,
+    });
+
+    // Upload initial positions to buffer A
+    device.queue.writeBuffer(
+      this.positionBufferA,
+      0,
+      positions.buffer,
+      positions.byteOffset,
+      positions.byteLength,
+    );
+  }
+
+  /**
+   * Generate random positions on AABB surfaces
+   */
+  private generateRandomPositions(): Float32Array {
+    const primitives = this.scene.getPrimitives();
     const positions = new Float32Array(this.numPoints * 3);
 
     // Calculate total surface area for proportional distribution
@@ -62,10 +118,6 @@ export class PointManager {
       // Number of points for this primitive (proportional to surface area)
       const primPointCount = Math.floor(
         (surfaceArea / totalSurfaceArea) * this.numPoints,
-      );
-
-      console.log(
-        `  ${prim.id}: ${primPointCount} points, AABB: [${aabb.min[0].toFixed(2)}, ${aabb.min[1].toFixed(2)}, ${aabb.min[2].toFixed(2)}] to [${aabb.max[0].toFixed(2)}, ${aabb.max[1].toFixed(2)}, ${aabb.max[2].toFixed(2)}]`,
       );
 
       // Distribute points on AABB surface
@@ -127,9 +179,9 @@ export class PointManager {
     }
 
     // Fill remaining points if any (due to rounding) with last primitive's AABB surface
-    if (pointIndex < this.numPoints) {
+    if (pointIndex < this.numPoints && primitives.length > 0) {
       const lastPrim = primitives[primitives.length - 1];
-      const aabb = lastPrim.getAABB();
+      const aabb = scaleAABB(lastPrim.getAABB(), 2);
 
       for (let i = pointIndex; i < this.numPoints; i++) {
         const face = Math.floor(Math.random() * 6);
@@ -185,26 +237,19 @@ export class PointManager {
       }
     }
 
-    // Create ping-pong GPU buffers for positions
-    const bufferSize = positions.byteLength;
-    const bufferUsage =
-      GPUBufferUsage.STORAGE |
-      GPUBufferUsage.COPY_DST |
-      GPUBufferUsage.COPY_SRC;
+    return positions;
+  }
 
-    this.positionBufferA = device.createBuffer({
-      size: bufferSize,
-      usage: bufferUsage,
-    });
+  /**
+   * Reinitialize points to random positions on AABB surfaces
+   * Call this each frame before gradient descent to start fresh
+   */
+  reinitialize(): void {
+    const positions = this.generateRandomPositions();
 
-    this.positionBufferB = device.createBuffer({
-      size: bufferSize,
-      usage: bufferUsage,
-    });
-
-    // Upload initial positions to buffer A
-    device.queue.writeBuffer(
-      this.positionBufferA,
+    // Write to current buffer
+    this.device.queue.writeBuffer(
+      this.getCurrentPositionBuffer(),
       0,
       positions.buffer,
       positions.byteOffset,

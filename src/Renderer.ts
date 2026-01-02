@@ -57,6 +57,7 @@ export class Renderer {
         @builtin(position) position: vec4f,
         @location(0) color: vec3f,
         @location(1) uv: vec2f,
+        @location(2) normal: vec3f,
       }
 
       @vertex
@@ -89,16 +90,18 @@ export class Renderer {
         // UV coordinates for fragment shader
         output.uv = quadOffset[vertexIndex];
 
-        // Color based on distance
-        let distance = gradients.results[instanceIndex].x;
+        // Extract surface normal from gradient (gradient.yzw contains the gradient vector)
+        let gradientData = gradients.results[instanceIndex];
+        let distance = gradientData.x;
+        let gradient = gradientData.yzw;
 
-        if (distance > 0.05) {
-          output.color = vec3f(1.0, 0.0, 0.0); // Red: far from surface
-        } else if (abs(distance) < 0.01) {
-          output.color = vec3f(0.0, 0.0, 1.0); // Blue: on surface
-        } else {
-          output.color = vec3f(0.0, 1.0, 0.0); // Green: close to surface
-        }
+        // Normalize the gradient to get the surface normal
+        let normal = normalize(gradient);
+        output.normal = normal;
+
+        // Color based on surface normal direction
+        // Map normal from [-1, 1] to [0, 1] for RGB visualization
+        output.color = normal * 0.5 + 0.5;
 
         return output;
       }
@@ -113,7 +116,15 @@ export class Renderer {
           discard;
         }
 
-        return vec4f(input.color, alpha);
+        // Simple directional lighting based on normal
+        let lightDir = normalize(vec3f(1.0, 1.0, 1.0));
+        let diffuse = max(dot(input.normal, lightDir), 0.0);
+
+        // Combine normal color with lighting
+        let baseColor = input.color;
+        let litColor = baseColor * (0.3 + 0.7 * diffuse); // Ambient + diffuse
+
+        return vec4f(litColor, alpha);
       }
     `;
 

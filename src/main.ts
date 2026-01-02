@@ -78,9 +78,7 @@ async function initWebGPU() {
   });
 
   // Build scene graph: (sphere1 ∪ box1) ∪ sphere2
-  scene.setRoot(
-    smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2),
-  );
+  scene.setRoot(smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2));
 
   // Initialize point manager (calculates point count dynamically)
   const pointManager = new PointManager(device, scene);
@@ -138,6 +136,9 @@ async function initWebGPU() {
 
     // Copy time (1 float)
     uniformData[19] = currentTime;
+
+    // Reinitialize points to random positions each frame
+    pointManager.reinitialize();
 
     for (let i = 0; i < 10; i++) {
       // Create single command encoder for all GPU work
