@@ -53,7 +53,9 @@ The application follows a multi-stage GPU pipeline pattern:
 **PointManager**
 - Manages ping-pong GPU buffers for particle positions (3D coordinates)
 - `getCurrentPositionBuffer()` / `getNextPositionBuffer()` / `swap()` pattern
-- Initialized with random positions in 3D space
+- Dynamically calculates point count based on scene (30k base points per primitive, scaled by surface area)
+- Distributes initial positions on AABB surfaces (6 faces) proportionally by primitive surface area
+- Provides excellent convergence by starting points on bounding box surfaces
 
 **GradientSampler**
 - Creates compute pipeline for gradient evaluation
@@ -127,14 +129,91 @@ renderer.render(...);
 - Compute shader workgroup size is typically 64 or 256
 - Always separate compute and render command encoders to avoid pipeline conflicts
 
-## Modifying SDFs
+## Scene Definition System
 
-To add or modify shapes:
+The SDF scene is defined CPU-side and compiled to WGSL shaders. This provides performance with flexibility.
 
-1. Add/modify SDF functions in the WGSL shader files
-2. For gradient descent to work, implement the `sdg*` variant that returns distance and gradient
-3. Update `sceneSDF()` to combine shapes using min/max/smin operations
-4. Note: Gradient combination for smooth min (`smin`) requires special handling
+### Creating a Scene
+
+```typescript
+import { SDFScene } from "./sdf/Scene";
+import { Sphere, Box } from "./sdf/Primitive";
+import { vec3 } from "gl-matrix";
+
+const scene = new SDFScene();
+
+// Add primitives
+const sphere = new Sphere({
+  id: "sphere1",
+  position: vec3.fromValues(0, 0, 0),
+  radius: 0.5,
+});
+
+const box = new Box({
+  id: "box1",
+  position: vec3.fromValues(1, 0, 0),
+  size: vec3.fromValues(0.3, 0.3, 0.3),
+});
+
+// Combine with operations
+scene.add(sphere).add(box).smoothUnion(0.1);
+```
+
+### Supported Primitives
+
+- **Sphere**: position (vec3), radius (f32)
+- **Box**: position (vec3), size (vec3)
+- **Torus**: position (vec3), majorRadius (f32), minorRadius (f32)
+- **Capsule**: position (vec3), height (f32), radius (f32)
+
+### Supported Operations
+
+- **union()**: Standard union (min)
+- **intersection()**: Intersection (max)
+- **subtraction()**: Subtract second from first
+- **smoothUnion(k)**: Smooth blend with parameter k
+
+### Animating the Scene
+
+Primitive parameters can be modified every frame without shader recompilation:
+
+```typescript
+// In render loop
+sphere.position[0] = Math.sin(time);
+sphere.radius = 0.5 + 0.1 * Math.cos(time);
+
+// Update GPU buffer
+gradientSampler.updateSceneParameters();
+```
+
+### Modifying Scene Structure
+
+Adding/removing primitives or changing operations requires shader recompilation (~10-100ms):
+
+```typescript
+scene.add(newPrimitive).union();
+gradientSampler.rebuildIfNeeded(); // Detects structure change and rebuilds
+```
+
+### How It Works
+
+1. **Scene Graph**: Primitives and operations form a tree structure
+2. **Code Generation**: Tree is compiled to WGSL shader code
+3. **Parameter Buffer**: All positions, sizes, etc. are in a uniform buffer
+4. **Shader Compilation**: Only when structure changes, parameters update every frame
+5. **Performance**: Near-zero overhead vs hardcoded shaders
+
+### Point Distribution
+
+The `PointManager` automatically:
+- Calculates point count based on primitives (30k base × √surface_area per primitive)
+- Distributes points on AABB surfaces (6 faces per box) proportionally by primitive surface area
+- Initializes points on bounding box surfaces for fast convergence to actual SDF surfaces
+- Clamps total point count between 10k-200k for performance
+
+This ensures accurate surface representation with efficient point usage. Points start on the AABB surface and converge inward/outward to the actual SDF surface via gradient descent.
+
+See `src/sdf/` directory for implementation details.
 
 ## Interactive Controls
 
