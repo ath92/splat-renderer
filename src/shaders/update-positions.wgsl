@@ -42,7 +42,7 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
 
   if (gradLen > 0.0001) {
     let normalizedGrad = gradient / gradLen;
-    newPos = pos - normalizedGrad * distance * stepSize;
+    newPos = pos - normalizedGrad * distance;
   }
 
   // Write updated position
