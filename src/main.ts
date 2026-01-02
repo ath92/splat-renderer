@@ -5,7 +5,7 @@ import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
 import { PositionUpdater } from "./PositionUpdater";
 import { Renderer } from "./Renderer";
-import { SDFScene } from "./sdf/Scene";
+import { SDFScene, smoothUnion } from "./sdf/Scene";
 import { Sphere } from "./sdf/Primitive";
 import { Box } from "./sdf/Primitive";
 import { vec3 } from "gl-matrix";
@@ -78,7 +78,9 @@ async function initWebGPU() {
   });
 
   // Build scene graph: (sphere1 ∪ box1) ∪ sphere2
-  scene.add(sphere1).add(box1).smoothUnion(0.15).add(sphere2).smoothUnion(0.1);
+  scene.setRoot(
+    smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2),
+  );
 
   // Initialize point manager (calculates point count dynamically)
   const pointManager = new PointManager(device, scene);
@@ -109,9 +111,9 @@ async function initWebGPU() {
     const currentTime = (Date.now() - startTime) / 1000;
 
     // Animate scene parameters
-    // sphere1.position[0] = Math.sin(currentTime) * 0.3;
-    // sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
-    // sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
+    sphere1.position[0] = Math.sin(currentTime) * 0.3;
+    sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
+    sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
 
     // Update scene parameters in GPU buffer
     gradientSampler.updateSceneParameters();

@@ -137,13 +137,13 @@ The SDF scene is defined CPU-side and compiled to WGSL shaders. This provides pe
 ### Creating a Scene
 
 ```typescript
-import { SDFScene } from "./sdf/Scene";
-import { Sphere, Box } from "./sdf/Primitive";
+import { SDFScene, smoothUnion, union } from "./sdf/Scene";
+import { Sphere, Box, Torus } from "./sdf/Primitive";
 import { vec3 } from "gl-matrix";
 
 const scene = new SDFScene();
 
-// Add primitives
+// Create primitives
 const sphere = new Sphere({
   id: "sphere1",
   position: vec3.fromValues(0, 0, 0),
@@ -156,8 +156,26 @@ const box = new Box({
   size: vec3.fromValues(0.3, 0.3, 0.3),
 });
 
-// Combine with operations
-scene.add(sphere).add(box).smoothUnion(0.1);
+const torus = new Torus({
+  id: "torus1",
+  position: vec3.fromValues(0, 0, 1),
+  majorRadius: 0.4,
+  minorRadius: 0.1,
+});
+
+// Build scene graph using functional composition
+scene.setRoot(
+  smoothUnion(0.1, sphere, box)
+);
+
+// More complex nested example:
+// (sphere ∪ box) ∪ torus
+scene.setRoot(
+  union(
+    smoothUnion(0.1, sphere, box),
+    torus
+  )
+);
 ```
 
 ### Supported Primitives
@@ -169,10 +187,12 @@ scene.add(sphere).add(box).smoothUnion(0.1);
 
 ### Supported Operations
 
-- **union()**: Standard union (min)
-- **intersection()**: Intersection (max)
-- **subtraction()**: Subtract second from first
-- **smoothUnion(k)**: Smooth blend with parameter k (uses polynomial smooth min with correct gradient computation)
+All operations take two scene nodes as parameters:
+
+- **union(a, b)**: Standard union (min)
+- **intersection(a, b)**: Intersection (max)
+- **subtraction(a, b)**: Subtract b from a
+- **smoothUnion(k, a, b)**: Smooth blend with smoothness parameter k (uses polynomial smooth min with correct gradient computation)
 
 ### Animating the Scene
 
@@ -192,7 +212,9 @@ gradientSampler.updateSceneParameters();
 Adding/removing primitives or changing operations requires shader recompilation (~10-100ms):
 
 ```typescript
-scene.add(newPrimitive).union();
+// Create a new scene graph structure
+const newSceneGraph = union(sphere, newPrimitive);
+scene.setRoot(newSceneGraph);
 gradientSampler.rebuildIfNeeded(); // Detects structure change and rebuilds
 ```
 

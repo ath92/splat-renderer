@@ -14,77 +14,83 @@ export interface OperationNode {
   children: SceneNode[];
 }
 
+/**
+ * Wrap a primitive in a scene node (or pass through if already a node)
+ */
+export function primitive(prim: Primitive | SceneNode): SceneNode {
+  if (typeof prim === "object" && "type" in prim) {
+    return prim;
+  }
+  return { type: "primitive", primitive: prim };
+}
+
+/**
+ * Combine two scene nodes with union (min operation)
+ */
+export function union(a: Primitive | SceneNode, b: Primitive | SceneNode): SceneNode {
+  return {
+    type: "operation",
+    operation: new Union(),
+    children: [primitive(a), primitive(b)],
+  };
+}
+
+/**
+ * Combine two scene nodes with intersection (max operation)
+ */
+export function intersection(a: Primitive | SceneNode, b: Primitive | SceneNode): SceneNode {
+  return {
+    type: "operation",
+    operation: new Intersection(),
+    children: [primitive(a), primitive(b)],
+  };
+}
+
+/**
+ * Subtract the second scene node from the first
+ */
+export function subtraction(a: Primitive | SceneNode, b: Primitive | SceneNode): SceneNode {
+  return {
+    type: "operation",
+    operation: new Subtraction(),
+    children: [primitive(a), primitive(b)],
+  };
+}
+
+/**
+ * Combine two scene nodes with smooth union
+ * @param k Smoothness parameter (higher = smoother blend)
+ */
+export function smoothUnion(k: number, a: Primitive | SceneNode, b: Primitive | SceneNode): SceneNode {
+  return {
+    type: "operation",
+    operation: new SmoothUnion(k),
+    children: [primitive(a), primitive(b)],
+  };
+}
+
 export class SDFScene {
   private root: SceneNode | null = null;
   private primitiveMap: Map<string, Primitive> = new Map();
 
   /**
-   * Add a primitive to the scene. If this is the first element, it becomes the root.
-   * Otherwise, it will be combined with the existing scene using the next operation.
+   * Set the root of the scene graph
    */
-  add(primitive: Primitive): this {
-    this.primitiveMap.set(primitive.id, primitive);
+  setRoot(node: SceneNode): void {
+    this.root = node;
+    this.primitiveMap.clear();
+    this.collectPrimitives(node);
+  }
 
-    const node: PrimitiveNode = {
-      type: "primitive",
-      primitive,
-    };
-
-    if (!this.root) {
-      this.root = node;
+  /**
+   * Traverse the scene graph and collect all primitives
+   */
+  private collectPrimitives(node: SceneNode): void {
+    if (node.type === "primitive") {
+      this.primitiveMap.set(node.primitive.id, node.primitive);
     } else {
-      // Store for next operation
-      this.pendingNode = node;
+      node.children.forEach((child) => this.collectPrimitives(child));
     }
-
-    return this;
-  }
-
-  private pendingNode: SceneNode | null = null;
-
-  /**
-   * Combine the previous elements with union (min operation)
-   */
-  union(): this {
-    return this.applyOperation(new Union());
-  }
-
-  /**
-   * Combine the previous elements with intersection (max operation)
-   */
-  intersection(): this {
-    return this.applyOperation(new Intersection());
-  }
-
-  /**
-   * Subtract the last added primitive from the previous scene
-   */
-  subtraction(): this {
-    return this.applyOperation(new Subtraction());
-  }
-
-  /**
-   * Combine the previous elements with smooth union
-   */
-  smoothUnion(k: number = 0.1): this {
-    return this.applyOperation(new SmoothUnion(k));
-  }
-
-  private applyOperation(operation: Operation): this {
-    if (!this.root || !this.pendingNode) {
-      throw new Error("Need at least two elements to apply an operation");
-    }
-
-    const opNode: OperationNode = {
-      type: "operation",
-      operation,
-      children: [this.root, this.pendingNode],
-    };
-
-    this.root = opNode;
-    this.pendingNode = null;
-
-    return this;
   }
 
   /**
