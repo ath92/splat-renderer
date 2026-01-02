@@ -40,8 +40,9 @@ The application follows a multi-stage GPU pipeline pattern:
 
 2. **Position Update** (Compute Shader)
    - `PositionUpdater` projects points toward surface using gradients
-   - Implements gradient descent: `newPos = pos - normalize(gradient) * distance`
+   - Implements instant projection: `newPos = pos - normalize(gradient) * distance`
    - Uses ping-pong buffers to avoid read/write conflicts
+   - Note: Instant projection can cause uneven distribution; consider using small step sizes for better coverage
 
 3. **Rendering** (Render Pipeline)
    - `Renderer` visualizes particles in 3D space
@@ -171,7 +172,7 @@ scene.add(sphere).add(box).smoothUnion(0.1);
 - **union()**: Standard union (min)
 - **intersection()**: Intersection (max)
 - **subtraction()**: Subtract second from first
-- **smoothUnion(k)**: Smooth blend with parameter k
+- **smoothUnion(k)**: Smooth blend with parameter k (uses polynomial smooth min with correct gradient computation)
 
 ### Animating the Scene
 

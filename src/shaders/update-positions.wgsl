@@ -34,14 +34,15 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
   let distance = gradientResult.x;
   let gradient = gradientResult.yzw;
 
-  // Project point directly to surface (distance = 0)
-  // newPos = pos - normalize(gradient) * distance
+  // Use small gradient descent steps for natural distribution
+  // Instead of instant projection, take small steps toward the surface
+  const stepSize = 0.005; // Small step size for iterative convergence
   let gradLen = length(gradient);
   var newPos = pos;
 
   if (gradLen > 0.0001) {
     let normalizedGrad = gradient / gradLen;
-    newPos = pos - normalizedGrad * distance; // Instant projection to surface
+    newPos = pos - normalizedGrad * distance * stepSize;
   }
 
   // Write updated position

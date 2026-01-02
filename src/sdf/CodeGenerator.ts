@@ -178,17 +178,21 @@ fn opSubtraction(a: vec4f, b: vec4f) -> vec4f {
   return opIntersection(a, negB);
 }
 
-// Smooth minimum with gradient (approximation)
+// Smooth minimum with gradient (quadratic polynomial - Inigo Quilez)
 fn opSmoothUnion(a: vec4f, b: vec4f, k: f32) -> vec4f {
-  let h = max(k - abs(a.x - b.x), 0.0) / k;
-  let m = h * h * h * 0.5;
-  let s = m * k * (1.0 / 6.0);
+  // Normalize k by 4.0 so parameter directly corresponds to blend thickness
+  let k4 = k * 4.0;
 
-  // Blend distance
-  let dist = min(a.x, b.x) - s;
+  // Distance field computation
+  let h = max(k4 - abs(a.x - b.x), 0.0) / k4;
+  let dist = min(a.x, b.x) - h * h * k4 * 0.25;
 
-  // Blend gradient (weighted by distance)
-  let t = clamp(0.5 + 0.5 * (b.x - a.x) / k, 0.0, 1.0);
+  // Gradient computation
+  // h factor for gradient (different from distance h)
+  let hGrad = max(k4 - abs(a.x - b.x), 0.0) / (2.0 * k4);
+
+  // Mix gradients based on which distance is smaller
+  let t = select(1.0 - hGrad, hGrad, a.x < b.x);
   let grad = mix(a.yzw, b.yzw, t);
 
   return vec4f(dist, grad);
