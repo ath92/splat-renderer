@@ -7,16 +7,18 @@ export class PointManager {
   constructor(device: GPUDevice, numPoints: number) {
     this.numPoints = numPoints;
 
-    // Initialize random positions in normalized screen space [-1, 1]
-    const positions = new Float32Array(numPoints * 2);
+    // Initialize random positions in 3D bounding volume [-1, 1]³
+    const positions = new Float32Array(numPoints * 3);
     for (let i = 0; i < numPoints; i++) {
-      positions[i * 2] = Math.random() * 2 - 1; // x
-      positions[i * 2 + 1] = Math.random() * 2 - 1; // y
+      positions[i * 3 + 0] = Math.random() * 2 - 1; // x
+      positions[i * 3 + 1] = Math.random() * 2 - 1; // y
+      positions[i * 3 + 2] = Math.random() * 2 - 1; // z
     }
 
     // Create ping-pong GPU buffers for positions
     const bufferSize = positions.byteLength;
-    const bufferUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    const bufferUsage =
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 
     this.positionBufferA = device.createBuffer({
       size: bufferSize,

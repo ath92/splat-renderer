@@ -3,7 +3,6 @@ export class GradientSampler {
   private computePipeline: GPUComputePipeline;
   private bindGroupLayout: GPUBindGroupLayout;
   private gradientBuffer: GPUBuffer;
-  private readbackBuffer: GPUBuffer | null = null;
   private numPoints: number;
 
   constructor(
@@ -16,7 +15,7 @@ export class GradientSampler {
 
     // Create compute shader module
     const computeShaderModule = device.createShaderModule({
-      label: "Compute gradient shader",
+      label: "Compute gradient 3D shader",
       code: computeShaderCode,
     });
 
@@ -88,50 +87,7 @@ export class GradientSampler {
     return this.gradientBuffer;
   }
 
-  // Optional async readback for debugging (non-blocking)
-  async readbackGradientsAsync(): Promise<Float32Array | null> {
-    // Create readback buffer on first use
-    if (!this.readbackBuffer) {
-      const gradientBufferSize = this.numPoints * 4 * 4;
-      this.readbackBuffer = this.device.createBuffer({
-        size: gradientBufferSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-      });
-    }
-
-    // Check if buffer is already mapped (previous read still in progress)
-    if (this.readbackBuffer.mapState !== "unmapped") {
-      return null; // Skip this frame
-    }
-
-    // Copy gradient buffer to readback buffer
-    const commandEncoder = this.device.createCommandEncoder();
-    commandEncoder.copyBufferToBuffer(
-      this.gradientBuffer,
-      0,
-      this.readbackBuffer,
-      0,
-      this.numPoints * 4 * 4
-    );
-    this.device.queue.submit([commandEncoder.finish()]);
-
-    // Read back results asynchronously
-    try {
-      await this.readbackBuffer.mapAsync(GPUMapMode.READ);
-      const arrayBuffer = this.readbackBuffer.getMappedRange();
-      const gradientResults = new Float32Array(arrayBuffer).slice();
-      this.readbackBuffer.unmap();
-      return gradientResults;
-    } catch (error) {
-      console.error("Failed to read back gradients:", error);
-      return null;
-    }
-  }
-
   destroy(): void {
     this.gradientBuffer.destroy();
-    if (this.readbackBuffer) {
-      this.readbackBuffer.destroy();
-    }
   }
 }

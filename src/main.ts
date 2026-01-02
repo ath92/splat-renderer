@@ -1,13 +1,11 @@
-import shaderCode from "./shader.wgsl?raw";
-import shaderGradientCode from "./shader-gradient.wgsl?raw";
-import computeGradientCode from "./compute-gradient.wgsl?raw";
-import updatePositionsCode from "./update-positions.wgsl?raw";
+import computeGradientCode from "./shaders/compute-gradient.wgsl?raw";
+import updatePositionsCode from "./shaders/update-positions.wgsl?raw";
+import { Camera } from "./Camera";
+import { OrbitCameraController } from "./OrbitCameraController";
 import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
 import { PositionUpdater } from "./PositionUpdater";
 import { Renderer } from "./Renderer";
-
-let useGradientMode = false;
 
 async function initWebGPU() {
   // Check WebGPU support
@@ -40,54 +38,47 @@ async function initWebGPU() {
     format: presentationFormat,
   });
 
-  // Create uniform buffer (now includes stepSize)
-  const uniformBufferSize = 4 * 4; // vec2f (8 bytes) + f32 time (4 bytes) + f32 stepSize (4 bytes)
+  // Create uniform buffer
+  // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes) = 80 bytes
+  const uniformBufferSize = 80;
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
   // Initialize components
-  const numPoints = 1000000;
-  const stepSize = 1;
+  const numPoints = 100000;
+
+  const camera = new Camera();
+  new OrbitCameraController(camera, canvas);
 
   const pointManager = new PointManager(device, numPoints);
   const gradientSampler = new GradientSampler(
     device,
     computeGradientCode,
-    numPoints,
+    numPoints
   );
   const positionUpdater = new PositionUpdater(
     device,
     updatePositionsCode,
-    numPoints,
+    numPoints
   );
   const renderer = new Renderer(
     device,
     context,
     presentationFormat,
-    shaderCode,
-    shaderGradientCode,
-    uniformBuffer,
-    numPoints,
+    numPoints
   );
 
   // Resize canvas to fill window
   function resizeCanvas() {
     canvas.width = window.innerWidth * devicePixelRatio;
     canvas.height = window.innerHeight * devicePixelRatio;
+    camera.setAspect(canvas.width / canvas.height);
   }
 
   resizeCanvas();
   window.addEventListener("resize", resizeCanvas);
-
-  // Toggle gradient mode with 'G' key
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "g" || event.key === "G") {
-      useGradientMode = !useGradientMode;
-      console.log(`Gradient mode: ${useGradientMode ? "ON" : "OFF"}`);
-    }
-  });
 
   // Render loop
   let startTime = Date.now();
@@ -95,13 +86,27 @@ async function initWebGPU() {
   function render() {
     const currentTime = (Date.now() - startTime) / 1000;
 
+    // Get camera matrices
+    const vpMatrix = camera.getViewProjectionMatrix();
+    const cameraPos = camera.getPosition();
+
     // Update uniforms
-    const uniformData = new Float32Array([
-      canvas.width,
-      canvas.height,
-      currentTime,
-      stepSize,
-    ]);
+    // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes)
+    const uniformData = new Float32Array(20); // 80 bytes / 4 = 20 floats
+
+    // Copy view-projection matrix (16 floats)
+    for (let i = 0; i < 16; i++) {
+      uniformData[i] = vpMatrix[i];
+    }
+
+    // Copy camera position (3 floats)
+    uniformData[16] = cameraPos[0];
+    uniformData[17] = cameraPos[1];
+    uniformData[18] = cameraPos[2];
+
+    // Copy time (1 float)
+    uniformData[19] = currentTime;
+
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
     // Create single command encoder for all GPU work
@@ -111,7 +116,7 @@ async function initWebGPU() {
     gradientSampler.evaluateGradients(
       commandEncoder,
       uniformBuffer,
-      pointManager.getCurrentPositionBuffer(),
+      pointManager.getCurrentPositionBuffer()
     );
 
     // 2. Update positions based on gradients (compute pass)
@@ -120,7 +125,7 @@ async function initWebGPU() {
       uniformBuffer,
       pointManager.getCurrentPositionBuffer(),
       gradientSampler.getGradientBuffer(),
-      pointManager.getNextPositionBuffer(),
+      pointManager.getNextPositionBuffer()
     );
 
     // Submit compute work
@@ -131,9 +136,11 @@ async function initWebGPU() {
 
     // 3. Render scene (separate command encoder for render pass)
     renderer.render(
-      useGradientMode,
+      uniformBuffer,
       pointManager.getCurrentPositionBuffer(),
       gradientSampler.getGradientBuffer(),
+      canvas.width,
+      canvas.height
     );
 
     requestAnimationFrame(render);

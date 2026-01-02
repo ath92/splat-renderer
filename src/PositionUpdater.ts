@@ -14,7 +14,7 @@ export class PositionUpdater {
 
     // Create compute shader module
     const computeShaderModule = device.createShaderModule({
-      label: "Update positions shader",
+      label: "Update positions 3D shader",
       code: updateShaderCode,
     });
 

@@ -4,94 +4,22 @@ export class Renderer {
   private presentationFormat: GPUTextureFormat;
   private numPoints: number;
 
-  // SDF pipelines
-  private sdfPipeline: GPURenderPipeline;
-  private sdfGradientPipeline: GPURenderPipeline;
-
   // Point rendering pipeline
   private pointPipeline: GPURenderPipeline;
   private pointBindGroupLayout: GPUBindGroupLayout;
   private indirectBuffer: GPUBuffer;
-
-  // Bind groups
-  private sdfBindGroup: GPUBindGroup;
+  private depthTexture: GPUTexture | null = null;
 
   constructor(
     device: GPUDevice,
     context: GPUCanvasContext,
     presentationFormat: GPUTextureFormat,
-    sdfShaderCode: string,
-    sdfGradientShaderCode: string,
-    uniformBuffer: GPUBuffer,
     numPoints: number
   ) {
     this.numPoints = numPoints;
     this.device = device;
     this.context = context;
     this.presentationFormat = presentationFormat;
-
-    // Create shader modules
-    const sdfShaderModule = device.createShaderModule({
-      label: "SDF shader",
-      code: sdfShaderCode,
-    });
-
-    const sdfGradientShaderModule = device.createShaderModule({
-      label: "SDF gradient shader",
-      code: sdfGradientShaderCode,
-    });
-
-    // Create bind group layout for SDF
-    const sdfBindGroupLayout = device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "uniform" },
-        },
-      ],
-    });
-
-    // Create bind group for SDF
-    this.sdfBindGroup = device.createBindGroup({
-      layout: sdfBindGroupLayout,
-      entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
-    });
-
-    // Create pipeline layout
-    const sdfPipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [sdfBindGroupLayout],
-    });
-
-    // Create SDF render pipeline
-    this.sdfPipeline = device.createRenderPipeline({
-      layout: sdfPipelineLayout,
-      vertex: {
-        module: sdfShaderModule,
-        entryPoint: "vertexMain",
-      },
-      fragment: {
-        module: sdfShaderModule,
-        entryPoint: "fragmentMain",
-        targets: [{ format: presentationFormat }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
-
-    // Create SDF gradient render pipeline
-    this.sdfGradientPipeline = device.createRenderPipeline({
-      layout: sdfPipelineLayout,
-      vertex: {
-        module: sdfGradientShaderModule,
-        entryPoint: "vertexMain",
-      },
-      fragment: {
-        module: sdfGradientShaderModule,
-        entryPoint: "fragmentMain",
-        targets: [{ format: presentationFormat }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
 
     // Create point visualization shader and pipeline
     const { pipeline, bindGroupLayout } = this.createPointPipeline();
@@ -108,19 +36,27 @@ export class Renderer {
   } {
     const pointShaderCode = `
       struct PositionData {
-        positions: array<vec2f>,
+        positions: array<vec3f>,
       }
 
       struct GradientData {
-        results: array<vec4f>, // (distance, gradient.x, gradient.y, padding)
+        results: array<vec4f>, // (distance, gradient.x, gradient.y, gradient.z)
       }
 
-      @group(0) @binding(0) var<storage, read> positions: PositionData;
-      @group(0) @binding(1) var<storage, read> gradients: GradientData;
+      struct Uniforms {
+        viewProjectionMatrix: mat4x4f,
+        cameraPosition: vec3f,
+        time: f32,
+      }
+
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var<storage, read> positions: PositionData;
+      @group(0) @binding(2) var<storage, read> gradients: GradientData;
 
       struct VertexOutput {
         @builtin(position) position: vec4f,
         @location(0) color: vec3f,
+        @location(1) uv: vec2f,
       }
 
       @vertex
@@ -130,24 +66,33 @@ export class Renderer {
       ) -> VertexOutput {
         var output: VertexOutput;
 
-        // Get point data from storage buffers
-        let center = positions.positions[instanceIndex];
-        let distance = gradients.results[instanceIndex].x;
+        // Get 3D position from storage buffer
+        let worldPos = positions.positions[instanceIndex];
 
-        // Create a small quad for each point
-        let size = 0.01;
-        let offset = array<vec2f, 6>(
+        // Project to clip space
+        let clipPos = uniforms.viewProjectionMatrix * vec4f(worldPos, 1.0);
+
+        // Create billboard quad in screen space
+        let quadOffset = array<vec2f, 6>(
           vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
         );
+        let pointSize = 0.01; // Screen-space size
+        let screenOffset = quadOffset[vertexIndex] * pointSize;
 
-        let localPos = offset[vertexIndex] * size;
-        // Flip y to match SDF coordinate system
-        let flippedCenter = vec2f(center.x, -center.y);
-        output.position = vec4f(flippedCenter + localPos, 0.0, 1.0);
+        output.position = vec4f(
+          clipPos.xy + screenOffset * clipPos.w,
+          clipPos.z,
+          clipPos.w
+        );
 
-        // Color based on distance (red = far, green = close, blue = on surface)
-        if (distance > 0.01) {
+        // UV coordinates for fragment shader
+        output.uv = quadOffset[vertexIndex];
+
+        // Color based on distance
+        let distance = gradients.results[instanceIndex].x;
+
+        if (distance > 0.05) {
           output.color = vec3f(1.0, 0.0, 0.0); // Red: far from surface
         } else if (abs(distance) < 0.01) {
           output.color = vec3f(0.0, 0.0, 1.0); // Blue: on surface
@@ -160,12 +105,20 @@ export class Renderer {
 
       @fragment
       fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        return vec4f(input.color, 1.0);
+        // Draw smooth circle within quad
+        let dist = length(input.uv);
+        let alpha = 1.0 - smoothstep(0.8, 1.0, dist);
+
+        if (alpha < 0.1) {
+          discard;
+        }
+
+        return vec4f(input.color, alpha);
       }
     `;
 
     const pointShaderModule = this.device.createShaderModule({
-      label: "Point shader",
+      label: "Point 3D shader",
       code: pointShaderCode,
     });
 
@@ -175,10 +128,15 @@ export class Renderer {
         {
           binding: 0,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" },
+          buffer: { type: "uniform" },
         },
         {
           binding: 1,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 2,
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "read-only-storage" },
         },
@@ -213,6 +171,11 @@ export class Renderer {
         ],
       },
       primitive: { topology: "triangle-list" },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "less",
+      },
     });
 
     return { pipeline, bindGroupLayout };
@@ -243,11 +206,33 @@ export class Renderer {
     return buffer;
   }
 
+  private ensureDepthTexture(width: number, height: number): void {
+    if (
+      !this.depthTexture ||
+      this.depthTexture.width !== width ||
+      this.depthTexture.height !== height
+    ) {
+      if (this.depthTexture) {
+        this.depthTexture.destroy();
+      }
+
+      this.depthTexture = this.device.createTexture({
+        size: { width, height },
+        format: "depth24plus",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+    }
+  }
+
   render(
-    useGradientMode: boolean,
+    uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
-    gradientBuffer: GPUBuffer
+    gradientBuffer: GPUBuffer,
+    width: number,
+    height: number
   ): void {
+    this.ensureDepthTexture(width, height);
+
     const commandEncoder = this.device.createCommandEncoder();
     const textureView = this.context.getCurrentTexture().createView();
 
@@ -255,22 +240,21 @@ export class Renderer {
       colorAttachments: [
         {
           view: textureView,
-          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+          clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1.0 },
           loadOp: "clear",
           storeOp: "store",
         },
       ],
+      depthStencilAttachment: {
+        view: this.depthTexture!.createView(),
+        depthClearValue: 1.0,
+        depthLoadOp: "clear",
+        depthStoreOp: "store",
+      },
     });
 
-    // Render SDF
-    renderPass.setPipeline(
-      useGradientMode ? this.sdfGradientPipeline : this.sdfPipeline
-    );
-    renderPass.setBindGroup(0, this.sdfBindGroup);
-    renderPass.draw(3);
-
     // Render points using indirect rendering
-    this.renderPoints(renderPass, positionBuffer, gradientBuffer);
+    this.renderPoints(renderPass, uniformBuffer, positionBuffer, gradientBuffer);
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
@@ -278,6 +262,7 @@ export class Renderer {
 
   private renderPoints(
     renderPass: GPURenderPassEncoder,
+    uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
     gradientBuffer: GPUBuffer
   ): void {
@@ -285,8 +270,9 @@ export class Renderer {
     const pointBindGroup = this.device.createBindGroup({
       layout: this.pointBindGroupLayout,
       entries: [
-        { binding: 0, resource: { buffer: positionBuffer } },
-        { binding: 1, resource: { buffer: gradientBuffer } },
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: positionBuffer } },
+        { binding: 2, resource: { buffer: gradientBuffer } },
       ],
     });
 
@@ -298,5 +284,8 @@ export class Renderer {
 
   destroy(): void {
     this.indirectBuffer.destroy();
+    if (this.depthTexture) {
+      this.depthTexture.destroy();
+    }
   }
 }
