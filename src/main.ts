@@ -183,7 +183,6 @@ async function initWebGPU() {
     renderer.render(
       uniformBuffer,
       pointManager.getCurrentPositionBuffer(),
-      gradientSampler.getGradientBuffer(),
       curvatureSampler.getScaleFactorsBuffer(),
       canvas.width,
       canvas.height,

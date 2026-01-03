@@ -39,12 +39,8 @@ export class Renderer {
         positions: array<vec4f>, // vec4 for proper alignment in storage buffers
       }
 
-      struct GradientData {
-        results: array<vec4f>, // (distance, gradient.x, gradient.y, gradient.z)
-      }
-
-      struct ScaleFactors {
-        values: array<f32>,
+      struct CurvatureData {
+        values: array<vec4f>, // (avgNormal.xyz, scaleFactor)
       }
 
       struct Uniforms {
@@ -55,8 +51,7 @@ export class Renderer {
 
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
       @group(0) @binding(1) var<storage, read> positions: PositionData;
-      @group(0) @binding(2) var<storage, read> gradients: GradientData;
-      @group(0) @binding(3) var<storage, read> scaleFactors: ScaleFactors;
+      @group(0) @binding(2) var<storage, read> curvatureData: CurvatureData;
 
       struct VertexOutput {
         @builtin(position) position: vec4f,
@@ -81,11 +76,10 @@ export class Renderer {
         // Get 3D position from storage buffer (vec4, use .xyz)
         let worldPos = positions.positions[instanceIndex].xyz;
 
-        // Extract surface normal from gradient
-        let gradientData = gradients.results[instanceIndex];
-        let distance = gradientData.x;
-        let gradient = gradientData.yzw;
-        let normal = normalize(gradient);
+        // Extract average normal and scale factor from curvature data
+        let curvature = curvatureData.values[instanceIndex];
+        let normal = curvature.xyz;
+        let scaleFactor = curvature.w;
 
         // Construct tangent frame aligned with surface
         let tangent = computeTangent(normal);
@@ -96,9 +90,6 @@ export class Renderer {
           vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
         );
-
-        // Get curvature-based scale factor for this point
-        let scaleFactor = scaleFactors.values[instanceIndex];
 
         // Size parameters in world space
         let tangentScale = 0.025 * scaleFactor;    // Width along surface
@@ -164,11 +155,6 @@ export class Renderer {
         },
         {
           binding: 2,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" },
-        },
-        {
-          binding: 3,
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "read-only-storage" },
         },
@@ -250,8 +236,7 @@ export class Renderer {
   render(
     uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
-    gradientBuffer: GPUBuffer,
-    scaleFactorsBuffer: GPUBuffer,
+    curvatureBuffer: GPUBuffer,
     width: number,
     height: number
   ): void {
@@ -278,7 +263,7 @@ export class Renderer {
     });
 
     // Render points using indirect rendering
-    this.renderPoints(renderPass, uniformBuffer, positionBuffer, gradientBuffer, scaleFactorsBuffer);
+    this.renderPoints(renderPass, uniformBuffer, positionBuffer, curvatureBuffer);
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
@@ -288,8 +273,7 @@ export class Renderer {
     renderPass: GPURenderPassEncoder,
     uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
-    gradientBuffer: GPUBuffer,
-    scaleFactorsBuffer: GPUBuffer
+    curvatureBuffer: GPUBuffer
   ): void {
     // Create bind group for point rendering
     const pointBindGroup = this.device.createBindGroup({
@@ -297,8 +281,7 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: { buffer: positionBuffer } },
-        { binding: 2, resource: { buffer: gradientBuffer } },
-        { binding: 3, resource: { buffer: scaleFactorsBuffer } },
+        { binding: 2, resource: { buffer: curvatureBuffer } },
       ],
     });
 
