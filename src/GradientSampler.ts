@@ -73,9 +73,6 @@ export class GradientSampler {
     // Generate shader code from scene
     const shaderCode = WGSLCodeGenerator.generateComputeShader(this.scene);
 
-    console.log("Generated shader code:");
-    console.log(shaderCode);
-
     // Create compute shader module
     const computeShaderModule = this.device.createShaderModule({
       label: "Compute gradient shader (generated)",

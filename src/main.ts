@@ -109,9 +109,9 @@ async function initWebGPU() {
     const currentTime = (Date.now() - startTime) / 1000;
 
     // Animate scene parameters
-    sphere1.position[0] = Math.sin(currentTime) * 0.3;
-    sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
-    sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
+    // sphere1.position[0] = Math.sin(currentTime) * 0.3;
+    // sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
+    // sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
 
     // Update scene parameters in GPU buffer
     gradientSampler.updateSceneParameters();
@@ -136,6 +136,9 @@ async function initWebGPU() {
 
     // Copy time (1 float)
     uniformData[19] = currentTime;
+
+    // Update uniforms
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
     // Reinitialize points to random positions each frame
     pointManager.reinitialize();
@@ -164,13 +167,6 @@ async function initWebGPU() {
       // Swap buffers for next frame
       pointManager.swap();
     }
-
-    const commandEncoder = device.createCommandEncoder();
-
-    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-    // Submit compute work
-    device.queue.submit([commandEncoder.finish()]);
 
     // 3. Render scene (separate command encoder for render pass)
     renderer.render(

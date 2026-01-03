@@ -1,5 +1,11 @@
-import { scaleAABB } from "./sdf/Primitive";
+import { scaleAABB, Primitive } from "./sdf/Primitive";
+import type { AABB } from "./sdf/Primitive";
 import { SDFScene } from "./sdf/Scene";
+import { vec3 } from "gl-matrix";
+
+function rand_range(d = 0.0) {
+  return Math.random() * (1 - d * 2) + d;
+}
 
 export class PointManager {
   private numPoints: number;
@@ -48,23 +54,11 @@ export class PointManager {
       `Initializing ${this.numPoints} points for ${primitives.length} primitive(s)`,
     );
 
-    // Log AABB info for each primitive
-    const totalSurfaceArea = primitives.reduce(
-      (sum, prim) => sum + prim.getSurfaceArea(),
-      0,
+    // Log global AABB info
+    const globalAABB = this.computeGlobalAABB(primitives);
+    console.log(
+      `  Global AABB: [${globalAABB.min[0].toFixed(2)}, ${globalAABB.min[1].toFixed(2)}, ${globalAABB.min[2].toFixed(2)}] to [${globalAABB.max[0].toFixed(2)}, ${globalAABB.max[1].toFixed(2)}, ${globalAABB.max[2].toFixed(2)}]`,
     );
-
-    for (const prim of primitives) {
-      const aabb = scaleAABB(prim.getAABB(), 2);
-      const surfaceArea = prim.getSurfaceArea();
-      const primPointCount = Math.floor(
-        (surfaceArea / totalSurfaceArea) * this.numPoints,
-      );
-
-      console.log(
-        `  ${prim.id}: ${primPointCount} points, AABB: [${aabb.min[0].toFixed(2)}, ${aabb.min[1].toFixed(2)}, ${aabb.min[2].toFixed(2)}] to [${aabb.max[0].toFixed(2)}, ${aabb.max[1].toFixed(2)}, ${aabb.max[2].toFixed(2)}]`,
-      );
-    }
 
     // Generate initial positions
     const positions = this.generateRandomPositions();
@@ -98,146 +92,125 @@ export class PointManager {
 
   /**
    * Generate random positions on AABB surfaces
+   * Note: Uses vec4 alignment (4 floats per position) for WGSL storage buffer compatibility
    */
   private generateRandomPositions(): Float32Array {
     const primitives = this.scene.getPrimitives();
-    const positions = new Float32Array(this.numPoints * 3);
+    const positions = new Float32Array(this.numPoints * 4); // vec4 alignment for WGSL
 
-    // Calculate total surface area for proportional distribution
-    const totalSurfaceArea = primitives.reduce(
-      (sum, prim) => sum + prim.getSurfaceArea(),
-      0,
-    );
+    // Use a single global AABB instead of per-primitive AABBs
+    // This prevents overlapping AABB surfaces from creating point clusters
+    const globalAABB = this.computeGlobalAABB(primitives);
 
-    let pointIndex = 0;
+    const minX = globalAABB.min[0];
+    const minY = globalAABB.min[1];
+    const minZ = globalAABB.min[2];
+    const maxX = globalAABB.max[0];
+    const maxY = globalAABB.max[1];
+    const maxZ = globalAABB.max[2];
 
-    for (const prim of primitives) {
-      const aabb = scaleAABB(prim.getAABB(), 2);
-      const surfaceArea = prim.getSurfaceArea();
+    const dx = maxX - minX;
+    const dy = maxY - minY;
+    const dz = maxZ - minZ;
 
-      // Number of points for this primitive (proportional to surface area)
-      const primPointCount = Math.floor(
-        (surfaceArea / totalSurfaceArea) * this.numPoints,
-      );
+    const faceAreas = [
+      dy * dz, // -X face
+      dy * dz, // +X face
+      dx * dz, // -Y face
+      dx * dz, // +Y face
+      dx * dy, // -Z face
+      dx * dy, // +Z face
+    ];
 
-      // Distribute points on AABB surface
-      for (let i = 0; i < primPointCount && pointIndex < this.numPoints; i++) {
-        // Randomly choose one of 6 faces
-        const face = Math.floor(Math.random() * 6);
-        let x: number, y: number, z: number;
+    const totalFaceArea = faceAreas.reduce((sum, area) => sum + area, 0);
 
-        const minX = aabb.min[0];
-        const minY = aabb.min[1];
-        const minZ = aabb.min[2];
-        const maxX = aabb.max[0];
-        const maxY = aabb.max[1];
-        const maxZ = aabb.max[2];
-
-        switch (face) {
-          case 0: // -X face (left)
-            x = minX;
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 1: // +X face (right)
-            x = maxX;
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 2: // -Y face (bottom)
-            x = minX + Math.random() * (maxX - minX);
-            y = minY;
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 3: // +Y face (top)
-            x = minX + Math.random() * (maxX - minX);
-            y = maxY;
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 4: // -Z face (back)
-            x = minX + Math.random() * (maxX - minX);
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ;
-            break;
-          case 5: // +Z face (front)
-            x = minX + Math.random() * (maxX - minX);
-            y = minY + Math.random() * (maxY - minY);
-            z = maxZ;
-            break;
-          default:
-            x = minX;
-            y = minY;
-            z = minZ;
+    // Distribute all points on the global AABB surface
+    for (let i = 0; i < this.numPoints; i++) {
+      // Select face with probability proportional to its surface area
+      const rand = Math.random() * totalFaceArea;
+      let cumulativeArea = 0;
+      let face = 0;
+      for (let f = 0; f < 6; f++) {
+        cumulativeArea += faceAreas[f];
+        if (rand < cumulativeArea) {
+          face = f;
+          break;
         }
-
-        positions[pointIndex * 3 + 0] = x;
-        positions[pointIndex * 3 + 1] = y;
-        positions[pointIndex * 3 + 2] = z;
-
-        pointIndex++;
       }
-    }
 
-    // Fill remaining points if any (due to rounding) with last primitive's AABB surface
-    if (pointIndex < this.numPoints && primitives.length > 0) {
-      const lastPrim = primitives[primitives.length - 1];
-      const aabb = scaleAABB(lastPrim.getAABB(), 2);
+      let x: number, y: number, z: number;
 
-      for (let i = pointIndex; i < this.numPoints; i++) {
-        const face = Math.floor(Math.random() * 6);
-        let x: number, y: number, z: number;
-
-        const minX = aabb.min[0];
-        const minY = aabb.min[1];
-        const minZ = aabb.min[2];
-        const maxX = aabb.max[0];
-        const maxY = aabb.max[1];
-        const maxZ = aabb.max[2];
-
-        switch (face) {
-          case 0:
-            x = minX;
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 1:
-            x = maxX;
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 2:
-            x = minX + Math.random() * (maxX - minX);
-            y = minY;
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 3:
-            x = minX + Math.random() * (maxX - minX);
-            y = maxY;
-            z = minZ + Math.random() * (maxZ - minZ);
-            break;
-          case 4:
-            x = minX + Math.random() * (maxX - minX);
-            y = minY + Math.random() * (maxY - minY);
-            z = minZ;
-            break;
-          case 5:
-            x = minX + Math.random() * (maxX - minX);
-            y = minY + Math.random() * (maxY - minY);
-            z = maxZ;
-            break;
-          default:
-            x = minX;
-            y = minY;
-            z = minZ;
-        }
-
-        positions[i * 3 + 0] = x;
-        positions[i * 3 + 1] = y;
-        positions[i * 3 + 2] = z;
+      switch (face) {
+        case 0: // -X face (left)
+          x = minX;
+          y = minY + rand_range() * dy;
+          z = minZ + rand_range() * dz;
+          break;
+        case 1: // +X face (right)
+          x = maxX;
+          y = minY + rand_range() * dy;
+          z = minZ + rand_range() * dz;
+          break;
+        case 2: // -Y face (bottom)
+          x = minX + rand_range() * dx;
+          y = minY;
+          z = minZ + rand_range() * dz;
+          break;
+        case 3: // +Y face (top)
+          x = minX + rand_range() * dx;
+          y = maxY;
+          z = minZ + rand_range() * dz;
+          break;
+        case 4: // -Z face (back)
+          x = minX + rand_range() * dx;
+          y = minY + rand_range() * dy;
+          z = minZ;
+          break;
+        case 5: // +Z face (front)
+          x = minX + rand_range() * dx;
+          y = minY + rand_range() * dy;
+          z = maxZ;
+          break;
+        default:
+          x = minX;
+          y = minY;
+          z = minZ;
       }
+
+      positions[i * 4 + 0] = x;
+      positions[i * 4 + 1] = y;
+      positions[i * 4 + 2] = z;
+      positions[i * 4 + 3] = 0; // padding for vec4 alignment
     }
 
     return positions;
+  }
+
+  /**
+   * Compute a single global AABB that encompasses all primitives
+   */
+  private computeGlobalAABB(primitives: Primitive[]): AABB {
+    if (primitives.length === 0) {
+      return {
+        min: vec3.fromValues(-1, -1, -1),
+        max: vec3.fromValues(1, 1, 1),
+      };
+    }
+
+    // Start with first primitive's AABB (unscaled)
+    const firstAABB = primitives[0].getAABB();
+    const min = vec3.clone(firstAABB.min);
+    const max = vec3.clone(firstAABB.max);
+
+    // Expand to include all primitives (unscaled)
+    for (let i = 1; i < primitives.length; i++) {
+      const aabb = primitives[i].getAABB();
+      vec3.min(min, min, aabb.min);
+      vec3.max(max, max, aabb.max);
+    }
+
+    // Now scale the global AABB by 1.5x to give points some room
+    return scaleAABB({ min, max }, 1.5);
   }
 
   /**

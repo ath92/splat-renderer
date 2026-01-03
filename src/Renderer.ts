@@ -36,7 +36,7 @@ export class Renderer {
   } {
     const pointShaderCode = `
       struct PositionData {
-        positions: array<vec3f>,
+        positions: array<vec4f>, // vec4 for proper alignment in storage buffers
       }
 
       struct GradientData {
@@ -67,8 +67,8 @@ export class Renderer {
       ) -> VertexOutput {
         var output: VertexOutput;
 
-        // Get 3D position from storage buffer
-        let worldPos = positions.positions[instanceIndex];
+        // Get 3D position from storage buffer (vec4, use .xyz)
+        let worldPos = positions.positions[instanceIndex].xyz;
 
         // Project to clip space
         let clipPos = uniforms.viewProjectionMatrix * vec4f(worldPos, 1.0);

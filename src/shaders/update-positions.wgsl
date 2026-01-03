@@ -7,7 +7,7 @@ struct Uniforms {
 
 // Point data
 struct PositionData {
-  positions: array<vec3f>,
+  positions: array<vec4f>, // vec4 for proper alignment in storage buffers
 }
 
 struct GradientData {
@@ -29,7 +29,7 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
   }
 
   // Get current position and gradient
-  let pos = currentPositions.positions[index];
+  let pos = currentPositions.positions[index].xyz;
   let gradientResult = gradients.results[index];
   let distance = gradientResult.x;
   let gradient = gradientResult.yzw;
@@ -42,9 +42,9 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
 
   if (gradLen > 0.0001) {
     let normalizedGrad = gradient / gradLen;
-    newPos = pos - normalizedGrad * distance;
+    newPos = pos - normalizedGrad * distance ;
   }
 
-  // Write updated position
-  nextPositions.positions[index] = newPos;
+  // Write updated position (vec4 with 0 padding)
+  nextPositions.positions[index] = vec4f(newPos, 0.0);
 }

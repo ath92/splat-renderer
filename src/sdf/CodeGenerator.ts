@@ -30,7 +30,7 @@ struct Uniforms {
 ${paramsStruct}
 
 struct PointData {
-  positions: array<vec3f>,
+  positions: array<vec4f>, // vec4 for proper alignment in storage buffers
 }
 
 struct GradientData {
@@ -54,8 +54,8 @@ fn computeMain(@builtin(global_invocation_id) globalId: vec3u) {
     return;
   }
 
-  // Get point position in world space
-  let pos = points.positions[index];
+  // Get point position in world space (vec4, use .xyz)
+  let pos = points.positions[index].xyz;
 
   // Evaluate SDF gradient at this position
   let result = sceneSDF(pos);
