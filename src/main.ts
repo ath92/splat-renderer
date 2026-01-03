@@ -3,6 +3,7 @@ import { Camera } from "./Camera";
 import { OrbitCameraController } from "./OrbitCameraController";
 import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
+import { CurvatureSampler } from "./CurvatureSampler";
 import { PositionUpdater } from "./PositionUpdater";
 import { Renderer } from "./Renderer";
 import { SDFScene, smoothUnion } from "./sdf/Scene";
@@ -85,6 +86,7 @@ async function initWebGPU() {
   const numPoints = pointManager.getNumPoints();
 
   const gradientSampler = new GradientSampler(device, scene, numPoints);
+  const curvatureSampler = new CurvatureSampler(device, scene, numPoints);
   const positionUpdater = new PositionUpdater(
     device,
     updatePositionsCode,
@@ -113,8 +115,9 @@ async function initWebGPU() {
     sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
     sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
 
-    // Update scene parameters in GPU buffer
+    // Update scene parameters in GPU buffers
     gradientSampler.updateSceneParameters();
+    curvatureSampler.updateSceneParameters();
 
     // Get camera matrices
     const vpMatrix = camera.getViewProjectionMatrix();
@@ -168,11 +171,20 @@ async function initWebGPU() {
       pointManager.swap();
     }
 
+    // Compute curvature-based scale factors after points have settled
+    const curvatureCommandEncoder = device.createCommandEncoder();
+    curvatureSampler.computeScaleFactors(
+      curvatureCommandEncoder,
+      pointManager.getCurrentPositionBuffer()
+    );
+    device.queue.submit([curvatureCommandEncoder.finish()]);
+
     // 3. Render scene (separate command encoder for render pass)
     renderer.render(
       uniformBuffer,
       pointManager.getCurrentPositionBuffer(),
       gradientSampler.getGradientBuffer(),
+      curvatureSampler.getScaleFactorsBuffer(),
       canvas.width,
       canvas.height,
     );

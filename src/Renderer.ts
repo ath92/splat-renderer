@@ -43,6 +43,10 @@ export class Renderer {
         results: array<vec4f>, // (distance, gradient.x, gradient.y, gradient.z)
       }
 
+      struct ScaleFactors {
+        values: array<f32>,
+      }
+
       struct Uniforms {
         viewProjectionMatrix: mat4x4f,
         cameraPosition: vec3f,
@@ -52,6 +56,7 @@ export class Renderer {
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
       @group(0) @binding(1) var<storage, read> positions: PositionData;
       @group(0) @binding(2) var<storage, read> gradients: GradientData;
+      @group(0) @binding(3) var<storage, read> scaleFactors: ScaleFactors;
 
       struct VertexOutput {
         @builtin(position) position: vec4f,
@@ -92,10 +97,13 @@ export class Renderer {
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
         );
 
+        // Get curvature-based scale factor for this point
+        let scaleFactor = scaleFactors.values[instanceIndex];
+
         // Size parameters in world space
-        let tangentScale = 0.025;    // Width along surface
-        let bitangentScale = 0.025;  // Height along surface
-        let normalScale = 0.0;       // Thickness (0 = flat)
+        let tangentScale = 0.025 * scaleFactor;    // Width along surface
+        let bitangentScale = 0.025 * scaleFactor;  // Height along surface
+        let normalScale = 0.0;                     // Thickness (0 = flat)
 
         let offset2D = quadOffset[vertexIndex];
 
@@ -156,6 +164,11 @@ export class Renderer {
         },
         {
           binding: 2,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 3,
           visibility: GPUShaderStage.VERTEX,
           buffer: { type: "read-only-storage" },
         },
@@ -238,6 +251,7 @@ export class Renderer {
     uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
     gradientBuffer: GPUBuffer,
+    scaleFactorsBuffer: GPUBuffer,
     width: number,
     height: number
   ): void {
@@ -264,7 +278,7 @@ export class Renderer {
     });
 
     // Render points using indirect rendering
-    this.renderPoints(renderPass, uniformBuffer, positionBuffer, gradientBuffer);
+    this.renderPoints(renderPass, uniformBuffer, positionBuffer, gradientBuffer, scaleFactorsBuffer);
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
@@ -274,7 +288,8 @@ export class Renderer {
     renderPass: GPURenderPassEncoder,
     uniformBuffer: GPUBuffer,
     positionBuffer: GPUBuffer,
-    gradientBuffer: GPUBuffer
+    gradientBuffer: GPUBuffer,
+    scaleFactorsBuffer: GPUBuffer
   ): void {
     // Create bind group for point rendering
     const pointBindGroup = this.device.createBindGroup({
@@ -283,6 +298,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: uniformBuffer } },
         { binding: 1, resource: { buffer: positionBuffer } },
         { binding: 2, resource: { buffer: gradientBuffer } },
+        { binding: 3, resource: { buffer: scaleFactorsBuffer } },
       ],
     });
 

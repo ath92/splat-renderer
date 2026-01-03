@@ -4,6 +4,31 @@ import { OperationType } from "./Operation";
 
 export class WGSLCodeGenerator {
   /**
+   * Generate just the SDF function code (primitives, operations, params struct, and sceneSDF)
+   * Useful for reusing SDF logic in different shader contexts
+   */
+  static generateSDFFunction(scene: SDFScene): string {
+    const primitiveLibrary = this.generatePrimitiveLibrary();
+    const operationLibrary = this.generateOperationLibrary();
+    const paramsStruct = this.generateParamsStruct(scene);
+    const sceneSDF = this.generateSceneSDF(scene);
+
+    return `
+// Primitive SDF gradient functions
+${primitiveLibrary}
+
+// Operation functions
+${operationLibrary}
+
+// Scene parameters
+${paramsStruct}
+
+// Scene evaluation
+${sceneSDF}
+`;
+  }
+
+  /**
    * Generate complete WGSL code for the compute gradient shader
    */
   static generateComputeShader(scene: SDFScene): string {
