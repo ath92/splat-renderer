@@ -60,6 +60,12 @@ export class Renderer {
         @location(2) normal: vec3f,
       }
 
+      fn computeTangent(normal: vec3f) -> vec3f {
+        // Pick an axis least aligned with normal to avoid degeneracy
+        let up = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
+        return normalize(cross(up, normal));
+      }
+
       @vertex
       fn vertexMain(
         @builtin(vertex_index) vertexIndex: u32,
@@ -70,37 +76,47 @@ export class Renderer {
         // Get 3D position from storage buffer (vec4, use .xyz)
         let worldPos = positions.positions[instanceIndex].xyz;
 
-        // Project to clip space
-        let clipPos = uniforms.viewProjectionMatrix * vec4f(worldPos, 1.0);
+        // Extract surface normal from gradient
+        let gradientData = gradients.results[instanceIndex];
+        let distance = gradientData.x;
+        let gradient = gradientData.yzw;
+        let normal = normalize(gradient);
 
-        // Create billboard quad in screen space
+        // Construct tangent frame aligned with surface
+        let tangent = computeTangent(normal);
+        let bitangent = cross(normal, tangent);
+
+        // Quad corners in 2D
         let quadOffset = array<vec2f, 6>(
           vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
         );
-        let pointSize = 0.01; // Screen-space size
-        let screenOffset = quadOffset[vertexIndex] * pointSize;
 
-        output.position = vec4f(
-          clipPos.xy + screenOffset * clipPos.w,
-          clipPos.z,
-          clipPos.w
-        );
+        // Size parameters in world space
+        let tangentScale = 0.025;    // Width along surface
+        let bitangentScale = 0.025;  // Height along surface
+        let normalScale = 0.0;       // Thickness (0 = flat)
+
+        let offset2D = quadOffset[vertexIndex];
+
+        // Build 3D offset in world space using tangent frame
+        let worldOffset =
+          tangent * offset2D.x * tangentScale +
+          bitangent * offset2D.y * bitangentScale +
+          normal * normalScale;
+
+        let finalWorldPos = worldPos + worldOffset;
+
+        // Project to clip space
+        output.position = uniforms.viewProjectionMatrix * vec4f(finalWorldPos, 1.0);
 
         // UV coordinates for fragment shader
-        output.uv = quadOffset[vertexIndex];
+        output.uv = offset2D;
 
-        // Extract surface normal from gradient (gradient.yzw contains the gradient vector)
-        let gradientData = gradients.results[instanceIndex];
-        let distance = gradientData.x;
-        let gradient = gradientData.yzw;
-
-        // Normalize the gradient to get the surface normal
-        let normal = normalize(gradient);
+        // Pass normal for lighting
         output.normal = normal;
 
         // Color based on surface normal direction
-        // Map normal from [-1, 1] to [0, 1] for RGB visualization
         output.color = normal * 0.5 + 0.5;
 
         return output;
@@ -108,14 +124,6 @@ export class Renderer {
 
       @fragment
       fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        // Draw smooth circle within quad
-        let dist = length(input.uv);
-        let alpha = 1.0 - smoothstep(0.8, 1.0, dist);
-
-        if (alpha < 0.1) {
-          discard;
-        }
-
         // Simple directional lighting based on normal
         let lightDir = normalize(vec3f(1.0, 1.0, 1.0));
         let diffuse = max(dot(input.normal, lightDir), 0.0);
@@ -124,7 +132,7 @@ export class Renderer {
         let baseColor = input.color;
         let litColor = baseColor * (0.3 + 0.7 * diffuse); // Ambient + diffuse
 
-        return vec4f(litColor, alpha);
+        return vec4f(litColor, 1.0);
       }
     `;
 
@@ -168,16 +176,7 @@ export class Renderer {
         targets: [
           {
             format: this.presentationFormat,
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-              },
-            },
+            // No blending - opaque surface splats
           },
         ],
       },
