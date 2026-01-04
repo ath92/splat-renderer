@@ -41,6 +41,10 @@ export class PerTileSorter {
         lists: array<TileList>,
       }
 
+      struct TileOffsets {
+        offsets: array<u32>,
+      }
+
       struct SplatIndices {
         indices: array<u32>,
       }
@@ -52,7 +56,8 @@ export class PerTileSorter {
       @group(0) @binding(0) var<uniform> params: SortParams;
       @group(0) @binding(1) var<storage, read> projectedSplats: ProjectedSplats;
       @group(0) @binding(2) var<storage, read_write> tileLists: TileLists;
-      @group(0) @binding(3) var<storage, read_write> splatIndices: SplatIndices;
+      @group(0) @binding(3) var<storage, read> tileOffsets: TileOffsets;
+      @group(0) @binding(4) var<storage, read_write> splatIndices: SplatIndices;
 
       // Shared memory for sorting (max 2048 splats per tile)
       var<workgroup> sharedIndices: array<u32, 2048>;
@@ -66,15 +71,16 @@ export class PerTileSorter {
         let tileIdx = workgroupId.x;
         let localThreadIdx = localId.x;
 
-        // Load count for this tile
+        // Get offset and count for this tile
+        let tileOffset = tileOffsets.offsets[tileIdx];
         let count = atomicLoad(&tileLists.lists[tileIdx].count);
         let numSplats = min(count, params.maxSplatsPerTile);
 
-        // Load data into shared memory (parallel load)
+        // Load data into shared memory from packed buffer
         // Use maxSplatsPerTile for uniform control flow
         for (var i = localThreadIdx; i < params.maxSplatsPerTile; i += 256u) {
           if (i < numSplats) {
-            let globalIdx = tileIdx * params.maxSplatsPerTile + i;
+            let globalIdx = tileOffset + i;
             let splatIdx = splatIndices.indices[globalIdx];
             sharedIndices[i] = splatIdx;
             sharedDepths[i] = projectedSplats.splats[splatIdx].depth;
@@ -108,9 +114,9 @@ export class PerTileSorter {
           workgroupBarrier();
         }
 
-        // Write sorted data back to global memory (only valid data)
+        // Write sorted data back to packed buffer
         for (var i = localThreadIdx; i < params.maxSplatsPerTile; i += 256u) {
-          let globalIdx = tileIdx * params.maxSplatsPerTile + i;
+          let globalIdx = tileOffset + i;
           splatIndices.indices[globalIdx] = sharedIndices[i];
         }
       }
@@ -141,7 +147,12 @@ export class PerTileSorter {
         {
           binding: 3,
           visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" },
+          buffer: { type: "read-only-storage" }, // tileOffsets
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "storage" }, // splatIndices
         },
       ],
     });
@@ -164,6 +175,7 @@ export class PerTileSorter {
     commandEncoder: GPUCommandEncoder,
     projectedBuffer: GPUBuffer,
     tileListsBuffer: GPUBuffer,
+    tileOffsetsBuffer: GPUBuffer,
     splatIndicesBuffer: GPUBuffer,
     numTiles: number,
     maxSplatsPerTile: number
@@ -184,7 +196,8 @@ export class PerTileSorter {
         { binding: 0, resource: { buffer: paramsBuffer } },
         { binding: 1, resource: { buffer: projectedBuffer } },
         { binding: 2, resource: { buffer: tileListsBuffer } },
-        { binding: 3, resource: { buffer: splatIndicesBuffer } },
+        { binding: 3, resource: { buffer: tileOffsetsBuffer } },
+        { binding: 4, resource: { buffer: splatIndicesBuffer } },
       ],
     });
 

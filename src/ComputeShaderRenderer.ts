@@ -45,7 +45,6 @@ export class ComputeShaderRenderer {
         time: f32,
         tileSize: u32,
         numTilesX: u32,
-        maxSplatsPerTile: u32,
       }
 
       struct SplatProperties {
@@ -68,12 +67,17 @@ export class ComputeShaderRenderer {
         lists: array<TileList>,
       }
 
+      struct TileOffsets {
+        offsets: array<u32>,
+      }
+
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
       @group(0) @binding(1) var<storage, read> splatProperties: SplatProperties;
       @group(0) @binding(2) var<storage, read> splatIndices: SplatIndices;
       @group(0) @binding(3) var<storage, read> curvatureData: CurvatureData;
       @group(0) @binding(4) var<storage, read_write> tileLists: TileLists;
-      @group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+      @group(0) @binding(5) var<storage, read> tileOffsets: TileOffsets;
+      @group(0) @binding(6) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
       fn computeTangent(normal: vec3f) -> vec3f {
         let up = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
@@ -176,15 +180,13 @@ export class ComputeShaderRenderer {
 
         let pixelPos = vec2f(f32(pixelCoord.x) + 0.5, f32(pixelCoord.y) + 0.5);
 
-        // Get actual count for this tile
-        let tileCount = atomicLoad(&tileLists.lists[tileIdx].count);
-        let numSplats = min(tileCount, uniforms.maxSplatsPerTile);
+        // Get offset and count for this tile
+        let tileOffset = tileOffsets.offsets[tileIdx];
+        let numSplats = atomicLoad(&tileLists.lists[tileIdx].count);
 
         // Process splats in this tile (back-to-front order)
-        let tileStartOffset = tileIdx * uniforms.maxSplatsPerTile;
-
         for (var i = 0u; i < numSplats; i++) {
-          let splatIdx = splatIndices.indices[tileStartOffset + i];
+          let splatIdx = splatIndices.indices[tileOffset + i];
 
           // Evaluate splat at this pixel
           let splatContribution = evaluateSplat(splatIdx, pixelPos, uniforms.viewProjectionMatrix);
@@ -242,6 +244,11 @@ export class ComputeShaderRenderer {
         },
         {
           binding: 5,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 6,
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: "write-only",
@@ -365,9 +372,9 @@ export class ComputeShaderRenderer {
     splatIndicesBuffer: GPUBuffer,
     curvatureBuffer: GPUBuffer,
     tileListsBuffer: GPUBuffer,
+    tileOffsetsBuffer: GPUBuffer,
     tileSize: number,
     numTilesX: number,
-    maxSplatsPerTile: number,
     width: number,
     height: number,
   ): void {
@@ -387,7 +394,6 @@ export class ComputeShaderRenderer {
     // Set tile parameters
     u32View[20] = tileSize;
     u32View[21] = numTilesX;
-    u32View[22] = maxSplatsPerTile;
 
     const computeUniformBuffer = this.device.createBuffer({
       size: 96,
@@ -404,7 +410,8 @@ export class ComputeShaderRenderer {
         { binding: 2, resource: { buffer: splatIndicesBuffer } },
         { binding: 3, resource: { buffer: curvatureBuffer } },
         { binding: 4, resource: { buffer: tileListsBuffer } },
-        { binding: 5, resource: this.outputTexture!.createView() },
+        { binding: 5, resource: { buffer: tileOffsetsBuffer } },
+        { binding: 6, resource: this.outputTexture!.createView() },
       ],
     });
 

@@ -8,7 +8,7 @@ import { PositionUpdater } from "./PositionUpdater";
 import { SplatPropertyManager } from "./SplatPropertyManager";
 import { SplatProjector } from "./SplatProjector";
 import { TileBinner } from "./TileBinner";
-import { PerTileSorter } from "./PerTileSorter";
+import { RadixSorter } from "./RadixSorter";
 import { ComputeShaderRenderer } from "./ComputeShaderRenderer";
 import { SDFScene, smoothUnion } from "./sdf/Scene";
 import { Sphere } from "./sdf/Primitive";
@@ -33,7 +33,12 @@ async function initWebGPU() {
     throw new Error("No appropriate GPUAdapter found.");
   }
 
-  const device = await adapter.requestDevice();
+  // Request device with higher limits for radix sort
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxComputeWorkgroupStorageSize: 32768, // Required for radix sort (uses 18448 bytes)
+    },
+  });
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("Failed to get WebGPU context");
@@ -108,8 +113,8 @@ async function initWebGPU() {
   // Gaussian splatting components
   const splatPropertyManager = new SplatPropertyManager(device, numPoints);
   const splatProjector = new SplatProjector(device, numPoints);
+  const radixSorter = new RadixSorter(device, numPoints);
   const tileBinner = new TileBinner(device, numPoints, 16); // 16x16 tiles
-  const perTileSorter = new PerTileSorter(device);
   const computeRenderer = new ComputeShaderRenderer(device, context, presentationFormat);
 
   // Resize canvas to fill window
@@ -176,8 +181,8 @@ async function initWebGPU() {
   // Initial fit
   fitSplatsToScene();
 
-  // Render loop - tile-based rendering with compute shader
-  function render() {
+  // Render loop - radix sort + tile-based rendering
+  async function render() {
     // Get camera matrices
     const vpMatrix = camera.getViewProjectionMatrix();
     const cameraPos = camera.getPosition();
@@ -204,7 +209,7 @@ async function initWebGPU() {
 
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-    // Tile-based rendering pipeline
+    // Rendering pipeline with radix sort
     const commandEncoder = device.createCommandEncoder();
 
     // Step 1: Project splats to screen space
@@ -214,30 +219,23 @@ async function initWebGPU() {
       splatPropertyManager.getPropertyBuffer()
     );
 
-    // Step 2: Bin splats to tiles
-    tileBinner.bin(
+    // Step 2: Globally sort by depth using radix sort (far to near)
+    const sortedIndices = await radixSorter.sort(
       commandEncoder,
+      splatProjector.getProjectedBuffer()
+    );
+
+    // Step 3: Bin sorted splats to tiles
+    await tileBinner.binSorted(
+      sortedIndices,
       splatProjector.getProjectedBuffer(),
       canvas.width,
       canvas.height
     );
 
-    // Step 3: Sort splats within each tile
-    const numTiles = tileBinner.getNumTilesX() * tileBinner.getNumTilesY();
-    perTileSorter.sort(
-      commandEncoder,
-      splatProjector.getProjectedBuffer(),
-      tileBinner.getTileListsBuffer(),
-      tileBinner.getSplatIndicesBuffer(),
-      numTiles,
-      tileBinner.getMaxSplatsPerTile()
-    );
-
-    device.queue.submit([commandEncoder.finish()]);
-
-    // Clean up temporary buffers after submit
+    // Clean up temporary buffers
     tileBinner.cleanupTempBuffers();
-    perTileSorter.cleanupTempBuffers();
+    radixSorter.cleanupTempBuffers();
 
     // Step 4: Render using compute shader (manual blending)
     computeRenderer.render(
@@ -246,9 +244,9 @@ async function initWebGPU() {
       tileBinner.getSplatIndicesBuffer(),
       curvatureSampler.getScaleFactorsBuffer(),
       tileBinner.getTileListsBuffer(),
+      tileBinner.getTileOffsetsBuffer(),
       tileBinner.getTileSize(),
       tileBinner.getNumTilesX(),
-      tileBinner.getMaxSplatsPerTile(),
       canvas.width,
       canvas.height
     );
