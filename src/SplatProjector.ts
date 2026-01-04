@@ -48,8 +48,9 @@ export class SplatProjector {
         screenBoundsMin: vec2f,
         screenBoundsMax: vec2f,
         depth: f32,
+        screenRadius: f32,  // Actual screen-space radius (not padded)
         originalIndex: u32,
-        _padding: vec2f, // Align to 32 bytes
+        _padding: f32, // Align to 32 bytes
       }
 
       struct ProjectedSplats {
@@ -111,20 +112,20 @@ export class SplatProjector {
           maxScreenRadius = max(maxScreenRadius, dist);
         }
 
-        // Add safety margin (1.5x) to ensure we don't clip splats at tile boundaries
-        let screenRadius = maxScreenRadius * 1.5;
-
-        // Compute 2D bounding box in screen space
-        let boundsMin = screenCenter - vec2f(screenRadius);
-        let boundsMax = screenCenter + vec2f(screenRadius);
+        // Compute 2D bounding box with safety margin for conservative tile binning
+        // Gaussian extent is ~2.0 * radius, so use 2.0x margin for bounds
+        let paddedRadius = maxScreenRadius * 2.0;
+        let boundsMin = screenCenter - vec2f(paddedRadius);
+        let boundsMax = screenCenter + vec2f(paddedRadius);
 
         // Store projected splat data
         projectedSplats.splats[index] = ProjectedSplat(
           boundsMin,
           boundsMax,
           depth,
+          maxScreenRadius,  // Actual screen-space radius (for rendering)
           index,
-          vec2f(0.0) // padding
+          0.0 // padding
         );
       }
     `;

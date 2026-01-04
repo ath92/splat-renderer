@@ -243,6 +243,7 @@ async function initWebGPU() {
       splatPropertyManager.getPropertyBuffer(),
       tileBinner.getSplatIndicesBuffer(),
       curvatureSampler.getScaleFactorsBuffer(),
+      splatProjector.getProjectedBuffer(),
       tileBinner.getTileListsBuffer(),
       tileBinner.getTileOffsetsBuffer(),
       tileBinner.getTileSize(),

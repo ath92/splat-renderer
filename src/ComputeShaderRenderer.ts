@@ -59,6 +59,19 @@ export class ComputeShaderRenderer {
         values: array<vec4f>, // (normal.xyz, scaleFactor)
       }
 
+      struct ProjectedSplat {
+        screenBoundsMin: vec2f,
+        screenBoundsMax: vec2f,
+        depth: f32,
+        screenRadius: f32,  // Actual screen-space radius (not padded)
+        originalIndex: u32,
+        _padding: f32,
+      }
+
+      struct ProjectedSplats {
+        splats: array<ProjectedSplat>,
+      }
+
       struct TileList {
         count: atomic<u32>,
       }
@@ -75,9 +88,10 @@ export class ComputeShaderRenderer {
       @group(0) @binding(1) var<storage, read> splatProperties: SplatProperties;
       @group(0) @binding(2) var<storage, read> splatIndices: SplatIndices;
       @group(0) @binding(3) var<storage, read> curvatureData: CurvatureData;
-      @group(0) @binding(4) var<storage, read_write> tileLists: TileLists;
-      @group(0) @binding(5) var<storage, read> tileOffsets: TileOffsets;
-      @group(0) @binding(6) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+      @group(0) @binding(4) var<storage, read> projectedSplats: ProjectedSplats;
+      @group(0) @binding(5) var<storage, read_write> tileLists: TileLists;
+      @group(0) @binding(6) var<storage, read> tileOffsets: TileOffsets;
+      @group(0) @binding(7) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
       fn computeTangent(normal: vec3f) -> vec3f {
         let up = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
@@ -94,7 +108,6 @@ export class ComputeShaderRenderer {
         let colorOpacity = splatProperties.data[splatIndex * 2u + 1u];
 
         let worldPos = posRadius.xyz;
-        let radius = posRadius.w;
         let color = colorOpacity.xyz;
         let opacity = colorOpacity.w;
 
@@ -102,33 +115,18 @@ export class ComputeShaderRenderer {
         let curvature = curvatureData.values[splatIndex];
         let normal = curvature.xyz;
 
-        // Project splat center to screen space
-        let clipPos = viewProj * vec4f(worldPos, 1.0);
+        // Get pre-computed projected data
+        let projected = projectedSplats.splats[splatIndex];
 
-        // Behind camera check
-        if (clipPos.w <= 0.0) {
+        // Check if pixel is within projected bounds (early exit for performance)
+        if (pixelPos.x < projected.screenBoundsMin.x || pixelPos.x > projected.screenBoundsMax.x ||
+            pixelPos.y < projected.screenBoundsMin.y || pixelPos.y > projected.screenBoundsMax.y) {
           return vec4f(0.0);
         }
 
-        let ndc = clipPos.xyz / clipPos.w;
-
-        // Get texture dimensions
-        let texSize = vec2f(textureDimensions(outputTexture));
-        let screenCenter = vec2f(
-          (ndc.x + 1.0) * 0.5 * texSize.x,
-          (1.0 - ndc.y) * 0.5 * texSize.y
-        );
-
-        // Estimate screen-space radius (simple approach)
-        // Project a point offset by radius
-        let offsetWorld = worldPos + vec3f(radius, 0.0, 0.0);
-        let offsetClip = viewProj * vec4f(offsetWorld, 1.0);
-        let offsetNDC = offsetClip.xyz / offsetClip.w;
-        let offsetScreen = vec2f(
-          (offsetNDC.x + 1.0) * 0.5 * texSize.x,
-          (1.0 - offsetNDC.y) * 0.5 * texSize.y
-        );
-        let screenRadius = distance(screenCenter, offsetScreen);
+        // Use pre-computed screen center and actual radius
+        let screenCenter = (projected.screenBoundsMin + projected.screenBoundsMax) * 0.5;
+        let screenRadius = projected.screenRadius;
 
         if (screenRadius < 0.5) {
           return vec4f(0.0); // Too small
@@ -140,12 +138,6 @@ export class ComputeShaderRenderer {
 
         // Simple circular Gaussian with smooth falloff
         let normalizedDist = pixelDist / screenRadius;
-
-        // Limit splat extent to avoid excessive overlap
-        // Use 2 sigma cutoff (covers ~95% of Gaussian)
-        if (normalizedDist > 2.0) {
-          return vec4f(0.0);
-        }
 
         // Gaussian with moderate falloff
         let sigma = 0.5;
@@ -240,15 +232,20 @@ export class ComputeShaderRenderer {
         {
           binding: 4,
           visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" },
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 5,
           visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "read-only-storage" },
+          buffer: { type: "storage" },
         },
         {
           binding: 6,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 7,
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: "write-only",
@@ -371,6 +368,7 @@ export class ComputeShaderRenderer {
     splatPropertyBuffer: GPUBuffer,
     splatIndicesBuffer: GPUBuffer,
     curvatureBuffer: GPUBuffer,
+    projectedBuffer: GPUBuffer,
     tileListsBuffer: GPUBuffer,
     tileOffsetsBuffer: GPUBuffer,
     tileSize: number,
@@ -409,9 +407,10 @@ export class ComputeShaderRenderer {
         { binding: 1, resource: { buffer: splatPropertyBuffer } },
         { binding: 2, resource: { buffer: splatIndicesBuffer } },
         { binding: 3, resource: { buffer: curvatureBuffer } },
-        { binding: 4, resource: { buffer: tileListsBuffer } },
-        { binding: 5, resource: { buffer: tileOffsetsBuffer } },
-        { binding: 6, resource: this.outputTexture!.createView() },
+        { binding: 4, resource: { buffer: projectedBuffer } },
+        { binding: 5, resource: { buffer: tileListsBuffer } },
+        { binding: 6, resource: { buffer: tileOffsetsBuffer } },
+        { binding: 7, resource: this.outputTexture!.createView() },
       ],
     });
 
