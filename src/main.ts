@@ -10,6 +10,7 @@ import { SplatProjector } from "./SplatProjector";
 import { TileBinner } from "./TileBinner";
 import { RadixSorter } from "./RadixSorter";
 import { ComputeShaderRenderer } from "./ComputeShaderRenderer";
+import { PerformanceMonitor } from "./PerformanceMonitor";
 import { SDFScene, smoothUnion } from "./sdf/Scene";
 import { Sphere } from "./sdf/Primitive";
 import { Box } from "./sdf/Primitive";
@@ -33,8 +34,11 @@ async function initWebGPU() {
     throw new Error("No appropriate GPUAdapter found.");
   }
 
-  // Request device with higher limits for radix sort
+  // Request device with higher limits for radix sort and timestamp queries
   const device = await adapter.requestDevice({
+    requiredFeatures: adapter.features.has("timestamp-query")
+      ? ["timestamp-query" as GPUFeatureName]
+      : [],
     requiredLimits: {
       maxComputeWorkgroupStorageSize: 32768, // Required for radix sort (uses 18448 bytes)
     },
@@ -116,6 +120,7 @@ async function initWebGPU() {
   const radixSorter = new RadixSorter(device, numPoints);
   const tileBinner = new TileBinner(device, numPoints, 16); // 16x16 tiles
   const computeRenderer = new ComputeShaderRenderer(device, context, presentationFormat);
+  const performanceMonitor = new PerformanceMonitor(device);
 
   // Resize canvas to fill window
   function resizeCanvas() {
@@ -181,8 +186,18 @@ async function initWebGPU() {
   // Initial fit
   fitSplatsToScene();
 
+  // Get stats display element
+  const statsElement = document.getElementById("stats") as HTMLDivElement;
+
+  // FPS tracking
+  let frameCount = 0;
+  let lastFpsUpdate = performance.now();
+  let fps = 0;
+
   // Render loop - radix sort + tile-based rendering
   async function render() {
+    const frameStart = performance.now();
+
     // Get camera matrices
     const vpMatrix = camera.getViewProjectionMatrix();
     const cameraPos = camera.getPosition();
@@ -213,31 +228,38 @@ async function initWebGPU() {
     const commandEncoder = device.createCommandEncoder();
 
     // Step 1: Project splats to screen space
+    const projectionStart = performance.now();
     splatProjector.project(
       commandEncoder,
       uniformBuffer,
       splatPropertyManager.getPropertyBuffer()
     );
+    const projectionTime = performance.now() - projectionStart;
 
     // Step 2: Globally sort by depth using radix sort (far to near)
+    const sortStart = performance.now();
     const sortedIndices = await radixSorter.sort(
       commandEncoder,
       splatProjector.getProjectedBuffer()
     );
+    const sortTime = performance.now() - sortStart;
 
-    // Step 3: Bin sorted splats to tiles
+    // Step 3: Bin sorted splats to tiles (CPU-based)
+    const binStart = performance.now();
     await tileBinner.binSorted(
       sortedIndices,
       splatProjector.getProjectedBuffer(),
       canvas.width,
       canvas.height
     );
+    const binTime = performance.now() - binStart;
 
     // Clean up temporary buffers
     tileBinner.cleanupTempBuffers();
     radixSorter.cleanupTempBuffers();
 
     // Step 4: Render using compute shader (manual blending)
+    const renderStart = performance.now();
     computeRenderer.render(
       uniformData,
       splatPropertyManager.getPropertyBuffer(),
@@ -251,6 +273,29 @@ async function initWebGPU() {
       canvas.width,
       canvas.height
     );
+    const renderTime = performance.now() - renderStart;
+
+    const frameTime = performance.now() - frameStart;
+
+    // Update FPS
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsUpdate >= 1000) {
+      fps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+      frameCount = 0;
+      lastFpsUpdate = now;
+    }
+
+    // Update stats display
+    if (statsElement) {
+      statsElement.textContent = `FPS: ${fps}
+Frame: ${frameTime.toFixed(2)}ms
+Projection: ${projectionTime.toFixed(2)}ms
+Radix Sort: ${sortTime.toFixed(2)}ms
+Tile Binning: ${binTime.toFixed(2)}ms
+Render: ${renderTime.toFixed(2)}ms
+Splats: ${numPoints.toLocaleString()}`;
+    }
 
     requestAnimationFrame(render);
   }
