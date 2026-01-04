@@ -1,40 +1,45 @@
-export class Renderer {
+/**
+ * Simple sequential renderer - one draw call per splat
+ * Guarantees perfect back-to-front ordering but slower than tile-based
+ */
+export class SequentialRenderer {
   private device: GPUDevice;
   private context: GPUCanvasContext;
   private presentationFormat: GPUTextureFormat;
-  private numPoints: number;
+  private numSplats: number;
 
-  // Point rendering pipeline
-  private pointPipeline: GPURenderPipeline;
-  private pointBindGroupLayout: GPUBindGroupLayout;
-  private indirectBuffer: GPUBuffer;
+  private pipeline: GPURenderPipeline;
+  private bindGroupLayout: GPUBindGroupLayout;
   private depthTexture: GPUTexture | null = null;
 
   constructor(
     device: GPUDevice,
     context: GPUCanvasContext,
     presentationFormat: GPUTextureFormat,
-    numPoints: number,
+    numSplats: number
   ) {
-    this.numPoints = numPoints;
     this.device = device;
     this.context = context;
     this.presentationFormat = presentationFormat;
+    this.numSplats = numSplats;
 
-    // Create point visualization shader and pipeline
-    const { pipeline, bindGroupLayout } = this.createPointPipeline();
-    this.pointPipeline = pipeline;
-    this.pointBindGroupLayout = bindGroupLayout;
-
-    // Create indirect draw buffer
-    this.indirectBuffer = this.createIndirectBuffer();
+    const { pipeline, bindGroupLayout } = this.createPipeline();
+    this.pipeline = pipeline;
+    this.bindGroupLayout = bindGroupLayout;
   }
 
-  private createPointPipeline(): {
+  private createPipeline(): {
     pipeline: GPURenderPipeline;
     bindGroupLayout: GPUBindGroupLayout;
   } {
-    const pointShaderCode = `
+    const shaderCode = `
+      struct Uniforms {
+        viewProjectionMatrix: mat4x4f,
+        cameraPosition: vec3f,
+        time: f32,
+        splatIndex: u32, // Which splat to render
+      }
+
       struct SplatProperties {
         data: array<vec4f>, // Interleaved: [pos+radius, color+opacity, ...]
       }
@@ -45,12 +50,6 @@ export class Renderer {
 
       struct CurvatureData {
         values: array<vec4f>, // (normal.xyz, scaleFactor)
-      }
-
-      struct Uniforms {
-        viewProjectionMatrix: mat4x4f,
-        cameraPosition: vec3f,
-        time: f32,
       }
 
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -67,22 +66,20 @@ export class Renderer {
       }
 
       fn computeTangent(normal: vec3f) -> vec3f {
-        // Pick an axis least aligned with normal to avoid degeneracy
         let up = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
         return normalize(cross(up, normal));
       }
 
       @vertex
       fn vertexMain(
-        @builtin(vertex_index) vertexIndex: u32,
-        @builtin(instance_index) instanceIndex: u32
+        @builtin(vertex_index) vertexIndex: u32
       ) -> VertexOutput {
         var output: VertexOutput;
 
-        // Use sorted indices for proper back-to-front rendering
-        let splatIndex = sortedIndices.indices[instanceIndex];
+        // Get the splat index from uniform (which splat we're rendering)
+        let splatIndex = sortedIndices.indices[uniforms.splatIndex];
 
-        // Read splat properties (interleaved format)
+        // Read splat properties
         let posRadius = splatProperties.data[splatIndex * 2u + 0u];
         let colorOpacity = splatProperties.data[splatIndex * 2u + 1u];
 
@@ -91,15 +88,15 @@ export class Renderer {
         let color = colorOpacity.xyz;
         let opacity = colorOpacity.w;
 
-        // Get normal from curvature data for billboard orientation
+        // Get normal from curvature data
         let curvature = curvatureData.values[splatIndex];
         let normal = curvature.xyz;
 
-        // Construct tangent frame aligned with surface
+        // Construct tangent frame
         let tangent = computeTangent(normal);
         let bitangent = cross(normal, tangent);
 
-        // Quad corners in 2D
+        // Quad corners
         let quadOffset = array<vec2f, 6>(
           vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
@@ -107,7 +104,7 @@ export class Renderer {
 
         let offset2D = quadOffset[vertexIndex];
 
-        // Build 3D offset in world space using tangent frame
+        // Build 3D offset using tangent frame
         let worldOffset =
           tangent * offset2D.x * radius +
           bitangent * offset2D.y * radius;
@@ -116,11 +113,7 @@ export class Renderer {
 
         // Project to clip space
         output.position = uniforms.viewProjectionMatrix * vec4f(finalWorldPos, 1.0);
-
-        // UV coordinates for Gaussian evaluation
         output.uv = offset2D;
-
-        // Pass through color and opacity
         output.color = color;
         output.opacity = opacity;
         output.normal = normal;
@@ -130,39 +123,30 @@ export class Renderer {
 
       @fragment
       fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        // Circular cutoff - discard pixels outside circle
         let dist2 = dot(input.uv, input.uv);
 
-        // Hard circular cutoff to avoid square quad edges
         if (dist2 > 1.0) {
           discard;
         }
 
-        // Gaussian falloff: fully opaque at center, fully transparent at edges
-        // Using smaller sigma (0.4) so it falls off more aggressively
-        // At center (dist=0): exp(0) = 1.0 (fully opaque)
-        // At edge (dist=1): exp(-0.5 * 1 / 0.16) = exp(-3.125) ≈ 0.044 (nearly transparent)
         let sigma = 0.4;
         let gaussian = exp(-0.5 * dist2 / (sigma * sigma));
 
-        // Re-enable lighting with very high ambient to minimize dark spots
         let lightDir = normalize(vec3f(1.0, 1.0, 1.0));
         let diffuse = max(dot(input.normal, lightDir), 0.0);
-        let litColor = input.color * (0.85 + 0.15 * diffuse); // 85% ambient, 15% diffuse
+        let litColor = input.color * (0.85 + 0.15 * diffuse);
 
-        // Use gaussian directly as alpha (center=1.0, edges=0.0)
         let finalAlpha = gaussian;
 
         return vec4f(litColor, finalAlpha);
       }
     `;
 
-    const pointShaderModule = this.device.createShaderModule({
-      label: "Point 3D shader",
-      code: pointShaderCode,
+    const shaderModule = this.device.createShaderModule({
+      label: "Sequential renderer shader",
+      code: shaderCode,
     });
 
-    // Create bind group layout for point rendering
     const bindGroupLayout = this.device.createBindGroupLayout({
       entries: [
         {
@@ -173,17 +157,17 @@ export class Renderer {
         {
           binding: 1,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // splat properties
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 2,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // sorted indices
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // curvature data
+          buffer: { type: "read-only-storage" },
         },
       ],
     });
@@ -193,16 +177,15 @@ export class Renderer {
         bindGroupLayouts: [bindGroupLayout],
       }),
       vertex: {
-        module: pointShaderModule,
+        module: shaderModule,
         entryPoint: "vertexMain",
       },
       fragment: {
-        module: pointShaderModule,
+        module: shaderModule,
         entryPoint: "fragmentMain",
         targets: [
           {
             format: this.presentationFormat,
-            // Enable alpha blending for Gaussian splats
             blend: {
               color: {
                 srcFactor: "src-alpha",
@@ -221,37 +204,12 @@ export class Renderer {
       primitive: { topology: "triangle-list" },
       depthStencil: {
         format: "depth24plus",
-        depthWriteEnabled: false, // Disable depth writes for transparent objects
-        depthCompare: "less",
+        depthWriteEnabled: false,
+        depthCompare: "always", // Always pass depth test for transparent objects
       },
     });
 
     return { pipeline, bindGroupLayout };
-  }
-
-  private createIndirectBuffer(): GPUBuffer {
-    // Indirect draw arguments: vertexCount, instanceCount, firstVertex, firstInstance
-    const indirectArray = new Uint32Array([
-      6, // vertexCount (6 vertices per quad)
-      this.numPoints, // instanceCount
-      0, // firstVertex
-      0, // firstInstance
-    ]);
-
-    const buffer = this.device.createBuffer({
-      size: indirectArray.byteLength,
-      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
-    });
-
-    this.device.queue.writeBuffer(
-      buffer,
-      0,
-      indirectArray.buffer,
-      indirectArray.byteOffset,
-      indirectArray.byteLength,
-    );
-
-    return buffer;
   }
 
   private ensureDepthTexture(width: number, height: number): void {
@@ -273,12 +231,12 @@ export class Renderer {
   }
 
   render(
-    uniformBuffer: GPUBuffer,
+    uniformData: Float32Array,
     splatPropertyBuffer: GPUBuffer,
     sortedIndexBuffer: GPUBuffer,
     curvatureBuffer: GPUBuffer,
     width: number,
-    height: number,
+    height: number
   ): void {
     this.ensureDepthTexture(width, height);
 
@@ -289,7 +247,7 @@ export class Renderer {
       colorAttachments: [
         {
           view: textureView,
-          clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }, // Dark background
+          clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1.0 },
           loadOp: "clear",
           storeOp: "store",
         },
@@ -302,45 +260,60 @@ export class Renderer {
       },
     });
 
-    // Render points using indirect rendering
-    this.renderPoints(
-      renderPass,
-      uniformBuffer,
-      splatPropertyBuffer,
-      sortedIndexBuffer,
-      curvatureBuffer,
-    );
+    renderPass.setPipeline(this.pipeline);
+
+    // Collect buffers to destroy after submit
+    const buffersToDestroy: GPUBuffer[] = [];
+
+    // Render each splat sequentially in back-to-front order
+    for (let i = 0; i < this.numSplats; i++) {
+      // Update uniform with current splat index
+      const splatUniformData = new ArrayBuffer(96);
+      const f32View = new Float32Array(splatUniformData);
+      const u32View = new Uint32Array(splatUniformData);
+
+      // Copy viewProjection matrix (16 floats = 64 bytes)
+      f32View.set(uniformData.subarray(0, 16), 0);
+      // Copy camera position (3 floats)
+      f32View.set(uniformData.subarray(16, 19), 16);
+      // Copy time (1 float)
+      f32View[19] = uniformData[19];
+      // Set splat index (u32 at byte offset 80)
+      u32View[20] = i;
+
+      const splatUniformBuffer = this.device.createBuffer({
+        size: 96,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true,
+      });
+      new Uint32Array(splatUniformBuffer.getMappedRange()).set(new Uint32Array(splatUniformData));
+      splatUniformBuffer.unmap();
+
+      const bindGroup = this.device.createBindGroup({
+        layout: this.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: splatUniformBuffer } },
+          { binding: 1, resource: { buffer: splatPropertyBuffer } },
+          { binding: 2, resource: { buffer: sortedIndexBuffer } },
+          { binding: 3, resource: { buffer: curvatureBuffer } },
+        ],
+      });
+
+      renderPass.setBindGroup(0, bindGroup);
+      renderPass.draw(6, 1, 0, 0); // 6 vertices, 1 instance
+
+      // Mark for cleanup after submit
+      buffersToDestroy.push(splatUniformBuffer);
+    }
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
-  }
 
-  private renderPoints(
-    renderPass: GPURenderPassEncoder,
-    uniformBuffer: GPUBuffer,
-    splatPropertyBuffer: GPUBuffer,
-    sortedIndexBuffer: GPUBuffer,
-    curvatureBuffer: GPUBuffer,
-  ): void {
-    // Create bind group for point rendering
-    const pointBindGroup = this.device.createBindGroup({
-      layout: this.pointBindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: splatPropertyBuffer } },
-        { binding: 2, resource: { buffer: sortedIndexBuffer } },
-        { binding: 3, resource: { buffer: curvatureBuffer } },
-      ],
-    });
-
-    // Draw points using indirect rendering
-    renderPass.setPipeline(this.pointPipeline);
-    renderPass.setBindGroup(0, pointBindGroup);
-    renderPass.drawIndirect(this.indirectBuffer, 0);
+    // Clean up uniform buffers after submit
+    buffersToDestroy.forEach(buffer => buffer.destroy());
   }
 
   destroy(): void {
-    this.indirectBuffer.destroy();
     if (this.depthTexture) {
       this.depthTexture.destroy();
     }

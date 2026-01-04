@@ -22,10 +22,10 @@ export class PointManager {
   private static calculatePointCount(scene: SDFScene): number {
     const primitives = scene.getPrimitives();
     if (primitives.length === 0) {
-      return 10000; // Default fallback
+      return 500; // Default fallback
     }
 
-    const basePointsPerPrimitive = 30000;
+    const basePointsPerPrimitive = 3000;
     let totalPoints = 0;
 
     for (const prim of primitives) {
@@ -35,7 +35,7 @@ export class PointManager {
       totalPoints += Math.floor(basePointsPerPrimitive * scaleFactor);
     }
 
-    return Math.max(10000, Math.min(totalPoints, 200000)); // Clamp to reasonable range
+    return Math.max(1000, Math.min(totalPoints, 20000)); // Clamp to reasonable range
   }
 
   constructor(device: GPUDevice, scene: SDFScene) {

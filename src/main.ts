@@ -5,7 +5,11 @@ import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
 import { CurvatureSampler } from "./CurvatureSampler";
 import { PositionUpdater } from "./PositionUpdater";
-import { Renderer } from "./Renderer";
+import { SplatPropertyManager } from "./SplatPropertyManager";
+import { SplatProjector } from "./SplatProjector";
+import { TileBinner } from "./TileBinner";
+import { PerTileSorter } from "./PerTileSorter";
+import { ComputeShaderRenderer } from "./ComputeShaderRenderer";
 import { SDFScene, smoothUnion } from "./sdf/Scene";
 import { Sphere } from "./sdf/Primitive";
 import { Box } from "./sdf/Primitive";
@@ -43,8 +47,9 @@ async function initWebGPU() {
   });
 
   // Create uniform buffer
-  // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes) = 80 bytes
-  const uniformBufferSize = 80;
+  // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes) + f32 screenWidth + f32 screenHeight = 88 bytes
+  // Pad to 96 bytes for alignment
+  const uniformBufferSize = 96;
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -78,8 +83,15 @@ async function initWebGPU() {
     radius: 0.25,
   });
 
-  // Build scene graph: (sphere1 ∪ box1) ∪ sphere2
-  scene.setRoot(smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2));
+  // Add another box positioned along the z-axis
+  const box2 = new Box({
+    id: "box2",
+    position: vec3.fromValues(0, 0, -1),
+    size: vec3.fromValues(0.4, 0.4, 0.4),
+  });
+
+  // Build scene graph: ((sphere1 ∪ box1) ∪ sphere2) ∪ box2
+  scene.setRoot(smoothUnion(0.1, smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2), box2));
 
   // Initialize point manager (calculates point count dynamically)
   const pointManager = new PointManager(device, scene);
@@ -92,7 +104,13 @@ async function initWebGPU() {
     updatePositionsCode,
     numPoints,
   );
-  const renderer = new Renderer(device, context, presentationFormat, numPoints);
+
+  // Gaussian splatting components
+  const splatPropertyManager = new SplatPropertyManager(device, numPoints);
+  const splatProjector = new SplatProjector(device, numPoints);
+  const tileBinner = new TileBinner(device, numPoints, 16); // 16x16 tiles
+  const perTileSorter = new PerTileSorter(device);
+  const computeRenderer = new ComputeShaderRenderer(device, context, presentationFormat);
 
   // Resize canvas to fill window
   function resizeCanvas() {
@@ -104,60 +122,25 @@ async function initWebGPU() {
   resizeCanvas();
   window.addEventListener("resize", resizeCanvas);
 
-  // Render loop
-  let startTime = Date.now();
+  // Fit splats to scene - call this whenever the scene changes
+  function fitSplatsToScene() {
+    console.log("Fitting splats to scene...");
 
-  function render() {
-    const currentTime = (Date.now() - startTime) / 1000;
-
-    // Animate scene parameters
-    sphere1.position[0] = Math.sin(currentTime) * 0.3;
-    sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
-    sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
-
-    // Update scene parameters in GPU buffers
-    gradientSampler.updateSceneParameters();
-    curvatureSampler.updateSceneParameters();
-
-    // Get camera matrices
-    const vpMatrix = camera.getViewProjectionMatrix();
-    const cameraPos = camera.getPosition();
-
-    // Update uniforms
-    // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes)
-    const uniformData = new Float32Array(20); // 80 bytes / 4 = 20 floats
-
-    // Copy view-projection matrix (16 floats)
-    for (let i = 0; i < 16; i++) {
-      uniformData[i] = vpMatrix[i];
-    }
-
-    // Copy camera position (3 floats)
-    uniformData[16] = cameraPos[0];
-    uniformData[17] = cameraPos[1];
-    uniformData[18] = cameraPos[2];
-
-    // Copy time (1 float)
-    uniformData[19] = currentTime;
-
-    // Update uniforms
-    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-    // Reinitialize points to random positions each frame
+    // Reinitialize points to random positions on AABB surfaces
     pointManager.reinitialize();
 
+    // Run gradient descent to project points onto surface
     for (let i = 0; i < 5; i++) {
-      // Create single command encoder for all GPU work
       const gradientDescentCommandEncoder = device.createCommandEncoder();
 
-      // 1. Evaluate gradients at current point positions (compute pass)
+      // 1. Evaluate gradients at current point positions
       gradientSampler.evaluateGradients(
         gradientDescentCommandEncoder,
         uniformBuffer,
         pointManager.getCurrentPositionBuffer(),
       );
 
-      // 2. Update positions based on gradients (compute pass)
+      // 2. Update positions based on gradients
       positionUpdater.updatePositions(
         gradientDescentCommandEncoder,
         uniformBuffer,
@@ -167,7 +150,6 @@ async function initWebGPU() {
       );
 
       device.queue.submit([gradientDescentCommandEncoder.finish()]);
-      // Swap buffers for next frame
       pointManager.swap();
     }
 
@@ -179,13 +161,96 @@ async function initWebGPU() {
     );
     device.queue.submit([curvatureCommandEncoder.finish()]);
 
-    // 3. Render scene (separate command encoder for render pass)
-    renderer.render(
-      uniformBuffer,
+    // Update splat properties (radius, color, opacity) from curvature data
+    const splatCommandEncoder = device.createCommandEncoder();
+    splatPropertyManager.updateFromCurvature(
+      splatCommandEncoder,
       pointManager.getCurrentPositionBuffer(),
-      curvatureSampler.getScaleFactorsBuffer(),
+      curvatureSampler.getScaleFactorsBuffer()
+    );
+    device.queue.submit([splatCommandEncoder.finish()]);
+
+    console.log("Splat fitting complete!");
+  }
+
+  // Initial fit
+  fitSplatsToScene();
+
+  // Render loop - tile-based rendering with compute shader
+  function render() {
+    // Get camera matrices
+    const vpMatrix = camera.getViewProjectionMatrix();
+    const cameraPos = camera.getPosition();
+
+    // Update uniforms (camera and screen dimensions)
+    const uniformData = new Float32Array(24); // 96 bytes / 4 = 24 floats
+
+    // Copy view-projection matrix (16 floats)
+    for (let i = 0; i < 16; i++) {
+      uniformData[i] = vpMatrix[i];
+    }
+
+    // Copy camera position (3 floats)
+    uniformData[16] = cameraPos[0];
+    uniformData[17] = cameraPos[1];
+    uniformData[18] = cameraPos[2];
+
+    // Time (unused but kept for compatibility)
+    uniformData[19] = 0;
+
+    // Screen dimensions (2 floats)
+    uniformData[20] = canvas.width;
+    uniformData[21] = canvas.height;
+
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+    // Tile-based rendering pipeline
+    const commandEncoder = device.createCommandEncoder();
+
+    // Step 1: Project splats to screen space
+    splatProjector.project(
+      commandEncoder,
+      uniformBuffer,
+      splatPropertyManager.getPropertyBuffer()
+    );
+
+    // Step 2: Bin splats to tiles
+    tileBinner.bin(
+      commandEncoder,
+      splatProjector.getProjectedBuffer(),
       canvas.width,
-      canvas.height,
+      canvas.height
+    );
+
+    // Step 3: Sort splats within each tile
+    const numTiles = tileBinner.getNumTilesX() * tileBinner.getNumTilesY();
+    perTileSorter.sort(
+      commandEncoder,
+      splatProjector.getProjectedBuffer(),
+      tileBinner.getTileListsBuffer(),
+      tileBinner.getSplatIndicesBuffer(),
+      numTiles,
+      tileBinner.getMaxSplatsPerTile()
+    );
+
+    device.queue.submit([commandEncoder.finish()]);
+
+    // Clean up temporary buffers after submit
+    tileBinner.cleanupTempBuffers();
+    perTileSorter.cleanupTempBuffers();
+
+    // Step 4: Render using compute shader (manual blending)
+    computeRenderer.render(
+      uniformData,
+      splatPropertyManager.getPropertyBuffer(),
+      tileBinner.getSplatIndicesBuffer(),
+      curvatureSampler.getScaleFactorsBuffer(),
+      tileBinner.getTileListsBuffer(),
+      tileBinner.getTileSize(),
+      tileBinner.getNumTilesX(),
+      tileBinner.getMaxSplatsPerTile(),
+      canvas.width,
+      canvas.height
     );
 
     requestAnimationFrame(render);
