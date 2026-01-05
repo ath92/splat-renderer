@@ -191,55 +191,11 @@ const rs_mem_sweep_2_offset = ${rsMemSweep2Offset}u;
   }
 
   /**
-   * Sort projected splats by depth (far to near)
-   * @param commandEncoder Command encoder
-   * @param projectedBuffer Buffer containing ProjectedSplat data
+   * Sort using internal keys and payload buffers (GPU-only, no readbacks)
+   * Keys and payload buffers should be filled by DepthKeyExtractor before calling this
    */
-  async sort(
-    commandEncoder: GPUCommandEncoder,
-    projectedBuffer: GPUBuffer
-  ): Promise<Uint32Array> {
-    // Copy depths from projected buffer to keys buffer
-    // We need to read back the depths first
-    const readbackBuffer = this.device.createBuffer({
-      size: this.numSplats * 32, // ProjectedSplat size
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
-    commandEncoder.copyBufferToBuffer(
-      projectedBuffer,
-      0,
-      readbackBuffer,
-      0,
-      this.numSplats * 32
-    );
-
-    this.device.queue.submit([commandEncoder.finish()]);
-
-    // Read back projected data
-    await readbackBuffer.mapAsync(GPUMapMode.READ);
-    const projectedData = new Float32Array(readbackBuffer.getMappedRange());
-
-    // Extract depths and convert to sortable integers
-    // We want far-to-near (descending), so negate depths
-    const keys = new Uint32Array(this.numSplats);
-    const payload = new Uint32Array(this.numSplats);
-
-    for (let i = 0; i < this.numSplats; i++) {
-      const depth = projectedData[i * 8 + 4]; // depth is at offset 4 in ProjectedSplat
-      // Convert float to sortable uint (flip bits for negative, flip sign bit for positive)
-      const floatBits = new Uint32Array(new Float32Array([depth]).buffer)[0];
-      const mask = (floatBits >> 31) === 1 ? 0xffffffff : 0x80000000;
-      keys[i] = floatBits ^ mask;
-      payload[i] = i; // Original index
-    }
-
-    readbackBuffer.unmap();
-    readbackBuffer.destroy();
-
-    // Upload keys and payload
-    this.device.queue.writeBuffer(this.keysBuffer, 0, keys);
-    this.device.queue.writeBuffer(this.payloadBuffer, 0, payload);
+  sort(): void {
+    // Keys and payload are already filled on GPU by DepthKeyExtractor
 
     // Create bind group
     const bindGroup = this.device.createBindGroup({
@@ -304,28 +260,28 @@ const rs_mem_sweep_2_offset = ${rsMemSweep2Offset}u;
       this.device.queue.submit([commandEncoder3.finish()]);
     }
 
-    // Read back sorted payload (original indices in sorted order)
-    const resultBuffer = this.device.createBuffer({
-      size: this.numSplats * 4,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
+    // Sorted indices remain in payloadBuffer on GPU (no readback)
+  }
 
-    const commandEncoder4 = this.device.createCommandEncoder();
-    commandEncoder4.copyBufferToBuffer(
-      this.payloadBuffer,
-      0,
-      resultBuffer,
-      0,
-      this.numSplats * 4
-    );
-    this.device.queue.submit([commandEncoder4.finish()]);
+  /**
+   * Get the buffer containing sorted indices (for use in subsequent GPU passes)
+   */
+  getSortedIndicesBuffer(): GPUBuffer {
+    return this.payloadBuffer;
+  }
 
-    await resultBuffer.mapAsync(GPUMapMode.READ);
-    const sortedIndices = new Uint32Array(resultBuffer.getMappedRange()).slice();
-    resultBuffer.unmap();
-    resultBuffer.destroy();
+  /**
+   * Get keys buffer for DepthKeyExtractor to write to
+   */
+  getKeysBuffer(): GPUBuffer {
+    return this.keysBuffer;
+  }
 
-    return sortedIndices;
+  /**
+   * Get payload buffer for DepthKeyExtractor to write to
+   */
+  getPayloadBuffer(): GPUBuffer {
+    return this.payloadBuffer;
   }
 
   cleanupTempBuffers(): void {

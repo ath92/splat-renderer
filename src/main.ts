@@ -5,12 +5,7 @@ import { PointManager } from "./PointManager";
 import { GradientSampler } from "./GradientSampler";
 import { CurvatureSampler } from "./CurvatureSampler";
 import { PositionUpdater } from "./PositionUpdater";
-import { SplatPropertyManager } from "./SplatPropertyManager";
-import { SplatProjector } from "./SplatProjector";
-import { TileBinner } from "./TileBinner";
-import { RadixSorter } from "./RadixSorter";
-import { ComputeShaderRenderer } from "./ComputeShaderRenderer";
-import { PerformanceMonitor } from "./PerformanceMonitor";
+import { Renderer } from "./Renderer";
 import { SDFScene, smoothUnion } from "./sdf/Scene";
 import { Sphere } from "./sdf/Primitive";
 import { Box } from "./sdf/Primitive";
@@ -34,15 +29,7 @@ async function initWebGPU() {
     throw new Error("No appropriate GPUAdapter found.");
   }
 
-  // Request device with higher limits for radix sort and timestamp queries
-  const device = await adapter.requestDevice({
-    requiredFeatures: adapter.features.has("timestamp-query")
-      ? ["timestamp-query" as GPUFeatureName]
-      : [],
-    requiredLimits: {
-      maxComputeWorkgroupStorageSize: 32768, // Required for radix sort (uses 18448 bytes)
-    },
-  });
+  const device = await adapter.requestDevice();
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("Failed to get WebGPU context");
@@ -56,9 +43,8 @@ async function initWebGPU() {
   });
 
   // Create uniform buffer
-  // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes) + f32 screenWidth + f32 screenHeight = 88 bytes
-  // Pad to 96 bytes for alignment
-  const uniformBufferSize = 96;
+  // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes) = 80 bytes
+  const uniformBufferSize = 80;
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -92,15 +78,8 @@ async function initWebGPU() {
     radius: 0.25,
   });
 
-  // Add another box positioned along the z-axis
-  const box2 = new Box({
-    id: "box2",
-    position: vec3.fromValues(0, 0, -1),
-    size: vec3.fromValues(0.4, 0.4, 0.4),
-  });
-
-  // Build scene graph: ((sphere1 ∪ box1) ∪ sphere2) ∪ box2
-  scene.setRoot(smoothUnion(0.1, smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2), box2));
+  // Build scene graph: (sphere1 ∪ box1) ∪ sphere2
+  scene.setRoot(smoothUnion(0.1, smoothUnion(0.15, sphere1, box1), sphere2));
 
   // Initialize point manager (calculates point count dynamically)
   const pointManager = new PointManager(device, scene);
@@ -113,14 +92,7 @@ async function initWebGPU() {
     updatePositionsCode,
     numPoints,
   );
-
-  // Gaussian splatting components
-  const splatPropertyManager = new SplatPropertyManager(device, numPoints);
-  const splatProjector = new SplatProjector(device, numPoints);
-  const radixSorter = new RadixSorter(device, numPoints);
-  const tileBinner = new TileBinner(device, numPoints, 16); // 16x16 tiles
-  const computeRenderer = new ComputeShaderRenderer(device, context, presentationFormat);
-  const performanceMonitor = new PerformanceMonitor(device);
+  const renderer = new Renderer(device, context, presentationFormat, numPoints);
 
   // Resize canvas to fill window
   function resizeCanvas() {
@@ -132,78 +104,28 @@ async function initWebGPU() {
   resizeCanvas();
   window.addEventListener("resize", resizeCanvas);
 
-  // Fit splats to scene - call this whenever the scene changes
-  function fitSplatsToScene() {
-    console.log("Fitting splats to scene...");
+  // Render loop
+  let startTime = Date.now();
 
-    // Reinitialize points to random positions on AABB surfaces
-    pointManager.reinitialize();
+  function render() {
+    const currentTime = (Date.now() - startTime) / 1000;
 
-    // Run gradient descent to project points onto surface
-    for (let i = 0; i < 5; i++) {
-      const gradientDescentCommandEncoder = device.createCommandEncoder();
+    // Animate scene parameters
+    sphere1.position[0] = Math.sin(currentTime) * 0.3;
+    sphere1.position[1] = Math.cos(currentTime * 0.7) * 0.2;
+    sphere2.radius = 0.25 + 0.1 * Math.sin(currentTime * 2);
 
-      // 1. Evaluate gradients at current point positions
-      gradientSampler.evaluateGradients(
-        gradientDescentCommandEncoder,
-        uniformBuffer,
-        pointManager.getCurrentPositionBuffer(),
-      );
-
-      // 2. Update positions based on gradients
-      positionUpdater.updatePositions(
-        gradientDescentCommandEncoder,
-        uniformBuffer,
-        pointManager.getCurrentPositionBuffer(),
-        gradientSampler.getGradientBuffer(),
-        pointManager.getNextPositionBuffer(),
-      );
-
-      device.queue.submit([gradientDescentCommandEncoder.finish()]);
-      pointManager.swap();
-    }
-
-    // Compute curvature-based scale factors after points have settled
-    const curvatureCommandEncoder = device.createCommandEncoder();
-    curvatureSampler.computeScaleFactors(
-      curvatureCommandEncoder,
-      pointManager.getCurrentPositionBuffer()
-    );
-    device.queue.submit([curvatureCommandEncoder.finish()]);
-
-    // Update splat properties (radius, color, opacity) from curvature data
-    const splatCommandEncoder = device.createCommandEncoder();
-    splatPropertyManager.updateFromCurvature(
-      splatCommandEncoder,
-      pointManager.getCurrentPositionBuffer(),
-      curvatureSampler.getScaleFactorsBuffer()
-    );
-    device.queue.submit([splatCommandEncoder.finish()]);
-
-    console.log("Splat fitting complete!");
-  }
-
-  // Initial fit
-  fitSplatsToScene();
-
-  // Get stats display element
-  const statsElement = document.getElementById("stats") as HTMLDivElement;
-
-  // FPS tracking
-  let frameCount = 0;
-  let lastFpsUpdate = performance.now();
-  let fps = 0;
-
-  // Render loop - radix sort + tile-based rendering
-  async function render() {
-    const frameStart = performance.now();
+    // Update scene parameters in GPU buffers
+    gradientSampler.updateSceneParameters();
+    curvatureSampler.updateSceneParameters();
 
     // Get camera matrices
     const vpMatrix = camera.getViewProjectionMatrix();
     const cameraPos = camera.getPosition();
 
-    // Update uniforms (camera and screen dimensions)
-    const uniformData = new Float32Array(24); // 96 bytes / 4 = 24 floats
+    // Update uniforms
+    // mat4x4f (64 bytes) + vec3f (12 bytes) + f32 (4 bytes)
+    const uniformData = new Float32Array(20); // 80 bytes / 4 = 20 floats
 
     // Copy view-projection matrix (16 floats)
     for (let i = 0; i < 16; i++) {
@@ -215,87 +137,57 @@ async function initWebGPU() {
     uniformData[17] = cameraPos[1];
     uniformData[18] = cameraPos[2];
 
-    // Time (unused but kept for compatibility)
-    uniformData[19] = 0;
+    // Copy time (1 float)
+    uniformData[19] = currentTime;
 
-    // Screen dimensions (2 floats)
-    uniformData[20] = canvas.width;
-    uniformData[21] = canvas.height;
-
+    // Update uniforms
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-    // Rendering pipeline with radix sort
-    const commandEncoder = device.createCommandEncoder();
+    // Reinitialize points to random positions each frame
+    pointManager.reinitialize();
 
-    // Step 1: Project splats to screen space
-    const projectionStart = performance.now();
-    splatProjector.project(
-      commandEncoder,
+    for (let i = 0; i < 5; i++) {
+      // Create single command encoder for all GPU work
+      const gradientDescentCommandEncoder = device.createCommandEncoder();
+
+      // 1. Evaluate gradients at current point positions (compute pass)
+      gradientSampler.evaluateGradients(
+        gradientDescentCommandEncoder,
+        uniformBuffer,
+        pointManager.getCurrentPositionBuffer(),
+      );
+
+      // 2. Update positions based on gradients (compute pass)
+      positionUpdater.updatePositions(
+        gradientDescentCommandEncoder,
+        uniformBuffer,
+        pointManager.getCurrentPositionBuffer(),
+        gradientSampler.getGradientBuffer(),
+        pointManager.getNextPositionBuffer(),
+      );
+
+      device.queue.submit([gradientDescentCommandEncoder.finish()]);
+      // Swap buffers for next frame
+      pointManager.swap();
+    }
+
+    // Compute curvature-based scale factors after points have settled
+    const curvatureCommandEncoder = device.createCommandEncoder();
+    curvatureSampler.computeScaleFactors(
+      curvatureCommandEncoder,
+      pointManager.getCurrentPositionBuffer()
+    );
+    device.queue.submit([curvatureCommandEncoder.finish()]);
+
+    // 3. Render scene (separate command encoder for render pass)
+    renderer.render(
       uniformBuffer,
-      splatPropertyManager.getPropertyBuffer()
-    );
-    const projectionTime = performance.now() - projectionStart;
-
-    // Step 2: Globally sort by depth using radix sort (far to near)
-    const sortStart = performance.now();
-    const sortedIndices = await radixSorter.sort(
-      commandEncoder,
-      splatProjector.getProjectedBuffer()
-    );
-    const sortTime = performance.now() - sortStart;
-
-    // Step 3: Bin sorted splats to tiles (CPU-based)
-    const binStart = performance.now();
-    await tileBinner.binSorted(
-      sortedIndices,
-      splatProjector.getProjectedBuffer(),
-      canvas.width,
-      canvas.height
-    );
-    const binTime = performance.now() - binStart;
-
-    // Clean up temporary buffers
-    tileBinner.cleanupTempBuffers();
-    radixSorter.cleanupTempBuffers();
-
-    // Step 4: Render using compute shader (manual blending)
-    const renderStart = performance.now();
-    computeRenderer.render(
-      uniformData,
-      splatPropertyManager.getPropertyBuffer(),
-      tileBinner.getSplatIndicesBuffer(),
+      pointManager.getCurrentPositionBuffer(),
+      gradientSampler.getGradientBuffer(),
       curvatureSampler.getScaleFactorsBuffer(),
-      splatProjector.getProjectedBuffer(),
-      tileBinner.getTileListsBuffer(),
-      tileBinner.getTileOffsetsBuffer(),
-      tileBinner.getTileSize(),
-      tileBinner.getNumTilesX(),
       canvas.width,
-      canvas.height
+      canvas.height,
     );
-    const renderTime = performance.now() - renderStart;
-
-    const frameTime = performance.now() - frameStart;
-
-    // Update FPS
-    frameCount++;
-    const now = performance.now();
-    if (now - lastFpsUpdate >= 1000) {
-      fps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
-      frameCount = 0;
-      lastFpsUpdate = now;
-    }
-
-    // Update stats display
-    if (statsElement) {
-      statsElement.textContent = `FPS: ${fps}
-Frame: ${frameTime.toFixed(2)}ms
-Projection: ${projectionTime.toFixed(2)}ms
-Radix Sort: ${sortTime.toFixed(2)}ms
-Tile Binning: ${binTime.toFixed(2)}ms
-Render: ${renderTime.toFixed(2)}ms
-Splats: ${numPoints.toLocaleString()}`;
-    }
 
     requestAnimationFrame(render);
   }

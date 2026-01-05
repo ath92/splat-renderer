@@ -72,12 +72,8 @@ export class ComputeShaderRenderer {
         splats: array<ProjectedSplat>,
       }
 
-      struct TileList {
-        count: atomic<u32>,
-      }
-
-      struct TileLists {
-        lists: array<TileList>,
+      struct TileCounts {
+        counts: array<u32>,
       }
 
       struct TileOffsets {
@@ -89,7 +85,7 @@ export class ComputeShaderRenderer {
       @group(0) @binding(2) var<storage, read> splatIndices: SplatIndices;
       @group(0) @binding(3) var<storage, read> curvatureData: CurvatureData;
       @group(0) @binding(4) var<storage, read> projectedSplats: ProjectedSplats;
-      @group(0) @binding(5) var<storage, read_write> tileLists: TileLists;
+      @group(0) @binding(5) var<storage, read> tileCounts: TileCounts;
       @group(0) @binding(6) var<storage, read> tileOffsets: TileOffsets;
       @group(0) @binding(7) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
@@ -174,7 +170,7 @@ export class ComputeShaderRenderer {
 
         // Get offset and count for this tile
         let tileOffset = tileOffsets.offsets[tileIdx];
-        let numSplats = atomicLoad(&tileLists.lists[tileIdx].count);
+        let numSplats = tileCounts.counts[tileIdx];
 
         // Process splats in this tile (back-to-front order)
         for (var i = 0u; i < numSplats; i++) {
@@ -237,7 +233,7 @@ export class ComputeShaderRenderer {
         {
           binding: 5,
           visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: "storage" },
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 6,

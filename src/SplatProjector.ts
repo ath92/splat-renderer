@@ -113,8 +113,10 @@ export class SplatProjector {
         }
 
         // Compute 2D bounding box with safety margin for conservative tile binning
-        // Gaussian extent is ~2.0 * radius, so use 2.0x margin for bounds
-        let paddedRadius = maxScreenRadius * 2.0;
+        // Gaussian (sigma=0.5) drops to ~1% at normalized distance of 3.0
+        // But normalizedDist = pixelDist / screenRadius, so we need bounds = 3.0 * screenRadius
+        // However, that's for full accuracy. For performance, use 1.5x (99% coverage)
+        let paddedRadius = maxScreenRadius * 1.5;
         let boundsMin = screenCenter - vec2f(paddedRadius);
         let boundsMax = screenCenter + vec2f(paddedRadius);
 

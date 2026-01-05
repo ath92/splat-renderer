@@ -14,7 +14,7 @@ export class Renderer {
     device: GPUDevice,
     context: GPUCanvasContext,
     presentationFormat: GPUTextureFormat,
-    numPoints: number,
+    numPoints: number
   ) {
     this.numPoints = numPoints;
     this.device = device;
@@ -35,16 +35,16 @@ export class Renderer {
     bindGroupLayout: GPUBindGroupLayout;
   } {
     const pointShaderCode = `
-      struct SplatProperties {
-        data: array<vec4f>, // Interleaved: [pos+radius, color+opacity, ...]
+      struct PositionData {
+        positions: array<vec4f>, // vec4 for proper alignment in storage buffers
       }
 
-      struct SortedIndices {
-        indices: array<u32>,
+      struct GradientData {
+        results: array<vec4f>, // (distance, gradient.x, gradient.y, gradient.z)
       }
 
-      struct CurvatureData {
-        values: array<vec4f>, // (normal.xyz, scaleFactor)
+      struct ScaleFactors {
+        values: array<f32>,
       }
 
       struct Uniforms {
@@ -54,16 +54,15 @@ export class Renderer {
       }
 
       @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-      @group(0) @binding(1) var<storage, read> splatProperties: SplatProperties;
-      @group(0) @binding(2) var<storage, read> sortedIndices: SortedIndices;
-      @group(0) @binding(3) var<storage, read> curvatureData: CurvatureData;
+      @group(0) @binding(1) var<storage, read> positions: PositionData;
+      @group(0) @binding(2) var<storage, read> gradients: GradientData;
+      @group(0) @binding(3) var<storage, read> scaleFactors: ScaleFactors;
 
       struct VertexOutput {
         @builtin(position) position: vec4f,
         @location(0) color: vec3f,
         @location(1) uv: vec2f,
-        @location(2) opacity: f32,
-        @location(3) normal: vec3f,
+        @location(2) normal: vec3f,
       }
 
       fn computeTangent(normal: vec3f) -> vec3f {
@@ -79,21 +78,14 @@ export class Renderer {
       ) -> VertexOutput {
         var output: VertexOutput;
 
-        // Use sorted indices for proper back-to-front rendering
-        let splatIndex = sortedIndices.indices[instanceIndex];
+        // Get 3D position from storage buffer (vec4, use .xyz)
+        let worldPos = positions.positions[instanceIndex].xyz;
 
-        // Read splat properties (interleaved format)
-        let posRadius = splatProperties.data[splatIndex * 2u + 0u];
-        let colorOpacity = splatProperties.data[splatIndex * 2u + 1u];
-
-        let worldPos = posRadius.xyz;
-        let radius = posRadius.w;
-        let color = colorOpacity.xyz;
-        let opacity = colorOpacity.w;
-
-        // Get normal from curvature data for billboard orientation
-        let curvature = curvatureData.values[splatIndex];
-        let normal = curvature.xyz;
+        // Extract surface normal from gradient
+        let gradientData = gradients.results[instanceIndex];
+        let distance = gradientData.x;
+        let gradient = gradientData.yzw;
+        let normal = normalize(gradient);
 
         // Construct tangent frame aligned with surface
         let tangent = computeTangent(normal);
@@ -105,55 +97,50 @@ export class Renderer {
           vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
         );
 
+        // Get curvature-based scale factor for this point
+        let scaleFactor = scaleFactors.values[instanceIndex];
+
+        // Size parameters in world space
+        let tangentScale = 0.025 * scaleFactor;    // Width along surface
+        let bitangentScale = 0.025 * scaleFactor;  // Height along surface
+        let normalScale = 0.0;                     // Thickness (0 = flat)
+
         let offset2D = quadOffset[vertexIndex];
 
         // Build 3D offset in world space using tangent frame
         let worldOffset =
-          tangent * offset2D.x * radius +
-          bitangent * offset2D.y * radius;
+          tangent * offset2D.x * tangentScale +
+          bitangent * offset2D.y * bitangentScale +
+          normal * normalScale;
 
         let finalWorldPos = worldPos + worldOffset;
 
         // Project to clip space
         output.position = uniforms.viewProjectionMatrix * vec4f(finalWorldPos, 1.0);
 
-        // UV coordinates for Gaussian evaluation
+        // UV coordinates for fragment shader
         output.uv = offset2D;
 
-        // Pass through color and opacity
-        output.color = color;
-        output.opacity = opacity;
+        // Pass normal for lighting
         output.normal = normal;
+
+        // Color based on surface normal direction
+        output.color = normal * 0.5 + 0.5;
 
         return output;
       }
 
       @fragment
       fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
-        // Circular cutoff - discard pixels outside circle
-        let dist2 = dot(input.uv, input.uv);
-
-        // Hard circular cutoff to avoid square quad edges
-        if (dist2 > 1.0) {
-          discard;
-        }
-
-        // Gaussian falloff: fully opaque at center, fully transparent at edges
-        // Using smaller sigma (0.4) so it falls off more aggressively
-        // At center (dist=0): exp(0) = 1.0 (fully opaque)
-        // At edge (dist=1): exp(-0.5 * 1 / 0.16) = exp(-3.125) ≈ 0.044 (nearly transparent)
-        let sigma = 0.4;
-        let gaussian = exp(-0.5 * dist2 / (sigma * sigma));
-
-        // Re-enable lighting with very high ambient to minimize dark spots
+        // Simple directional lighting based on normal
         let lightDir = normalize(vec3f(1.0, 1.0, 1.0));
         let diffuse = max(dot(input.normal, lightDir), 0.0);
-        let litColor = input.color * (0.85 + 0.15 * diffuse); // 85% ambient, 15% diffuse
 
-        // Use gaussian directly as alpha (center=1.0, edges=0.0)
-        let finalAlpha = gaussian;
+        // Combine normal color with lighting
+        let baseColor = input.color;
+        let litColor = baseColor * (0.3 + 0.7 * diffuse); // Ambient + diffuse
 
-        return vec4f(litColor, finalAlpha);
+        return vec4f(litColor, 1.0);
       }
     `;
 
@@ -167,23 +154,23 @@ export class Renderer {
       entries: [
         {
           binding: 0,
-          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          visibility: GPUShaderStage.VERTEX,
           buffer: { type: "uniform" },
         },
         {
           binding: 1,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // splat properties
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 2,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // sorted indices
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.VERTEX,
-          buffer: { type: "read-only-storage" }, // curvature data
+          buffer: { type: "read-only-storage" },
         },
       ],
     });
@@ -202,26 +189,14 @@ export class Renderer {
         targets: [
           {
             format: this.presentationFormat,
-            // Enable alpha blending for Gaussian splats
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-            },
+            // No blending - opaque surface splats
           },
         ],
       },
       primitive: { topology: "triangle-list" },
       depthStencil: {
         format: "depth24plus",
-        depthWriteEnabled: false, // Disable depth writes for transparent objects
+        depthWriteEnabled: true,
         depthCompare: "less",
       },
     });
@@ -248,7 +223,7 @@ export class Renderer {
       0,
       indirectArray.buffer,
       indirectArray.byteOffset,
-      indirectArray.byteLength,
+      indirectArray.byteLength
     );
 
     return buffer;
@@ -274,11 +249,11 @@ export class Renderer {
 
   render(
     uniformBuffer: GPUBuffer,
-    splatPropertyBuffer: GPUBuffer,
-    sortedIndexBuffer: GPUBuffer,
-    curvatureBuffer: GPUBuffer,
+    positionBuffer: GPUBuffer,
+    gradientBuffer: GPUBuffer,
+    scaleFactorsBuffer: GPUBuffer,
     width: number,
-    height: number,
+    height: number
   ): void {
     this.ensureDepthTexture(width, height);
 
@@ -289,7 +264,7 @@ export class Renderer {
       colorAttachments: [
         {
           view: textureView,
-          clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }, // Dark background
+          clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1.0 },
           loadOp: "clear",
           storeOp: "store",
         },
@@ -303,13 +278,7 @@ export class Renderer {
     });
 
     // Render points using indirect rendering
-    this.renderPoints(
-      renderPass,
-      uniformBuffer,
-      splatPropertyBuffer,
-      sortedIndexBuffer,
-      curvatureBuffer,
-    );
+    this.renderPoints(renderPass, uniformBuffer, positionBuffer, gradientBuffer, scaleFactorsBuffer);
 
     renderPass.end();
     this.device.queue.submit([commandEncoder.finish()]);
@@ -318,18 +287,18 @@ export class Renderer {
   private renderPoints(
     renderPass: GPURenderPassEncoder,
     uniformBuffer: GPUBuffer,
-    splatPropertyBuffer: GPUBuffer,
-    sortedIndexBuffer: GPUBuffer,
-    curvatureBuffer: GPUBuffer,
+    positionBuffer: GPUBuffer,
+    gradientBuffer: GPUBuffer,
+    scaleFactorsBuffer: GPUBuffer
   ): void {
     // Create bind group for point rendering
     const pointBindGroup = this.device.createBindGroup({
       layout: this.pointBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: splatPropertyBuffer } },
-        { binding: 2, resource: { buffer: sortedIndexBuffer } },
-        { binding: 3, resource: { buffer: curvatureBuffer } },
+        { binding: 1, resource: { buffer: positionBuffer } },
+        { binding: 2, resource: { buffer: gradientBuffer } },
+        { binding: 3, resource: { buffer: scaleFactorsBuffer } },
       ],
     });
 
